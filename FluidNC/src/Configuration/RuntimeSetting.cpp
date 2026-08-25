@@ -170,11 +170,32 @@ namespace Configuration {
             isHandled_ = true;
             if (newValue_.empty()) {
                 log_stream(out_, setting_prefix() << value->name);
-            } else {
-                log_string(out_, "Runtime setting of step_engine objects is not supported");
-                // auto parsed = Pin::create(newValue);
-                // value.swap(parsed);
+                return;
             }
+            // WebUI sends the index of the choice in the option list that
+            // JsonGenerator emitted, the console sends the engine name.
+            step_engine* selected = nullptr;
+            uint32_t     index;
+            if (string_util::from_decimal(newValue_, index)) {
+                if (index < step_engines.size()) {
+                    selected = step_engines[index];
+                }
+            } else {
+                for (auto const engine : step_engines) {
+                    if (string_util::equal_ignore_case(newValue_, engine->name)) {
+                        selected = engine;
+                        break;
+                    }
+                }
+            }
+            Assert(selected != nullptr, "Unknown stepping engine");
+
+            // Setting the engine that is already running is harmless, so accept
+            // it; actually switching engines would require reassigning every
+            // step and direction pin, which is not supported while running.
+            // Report that as an error instead of writing a message to out_,
+            // since that would corrupt the JSON reply that ESP401 sends.
+            Assert(selected == value, "Changing the stepping engine at runtime is not supported - edit config.yaml and restart");
         }
     }
 
