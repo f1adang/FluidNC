@@ -16,38 +16,64 @@
 Volume SD { "sd" };
 Volume LocalFS { "localfs" };
 
-static SemaphoreHandle_t sd_mount_lock = nullptr;
+// Locking rules for the SD mount state:
+//
+//   sd_cache_mutex protects cached_mount.  sd_mount_mutex protects
+//   sd_refcnt and the sd_mount()/sd_unmount() calls.  When both are
+//   needed, sd_cache_mutex is always taken first, since the FluidPath
+//   constructor holds it while constructing an SDMountState, whose
+//   constructor takes sd_mount_mutex.  ~SDMountState() takes only
+//   sd_mount_mutex, so nothing acquires the two in the opposite order.
+static SemaphoreHandle_t sd_cache_mutex = xSemaphoreCreateMutex();
+static SemaphoreHandle_t sd_mount_mutex = xSemaphoreCreateMutex();
 
-static void ensure_sd_locks() {
-    if (!sd_mount_lock) {
-        sd_mount_lock = xSemaphoreCreateBinary();
-        if (sd_mount_lock) {
-            xSemaphoreGive(sd_mount_lock);
-        }
-    }
+// The mount state of the most recent FluidPath, so that concurrent
+// paths on the SD card share a single mount.
+static std::weak_ptr<SDMountState> cached_mount;
+
+// The number of live SDMountState objects.  The card stays mounted while
+// this is nonzero.  This has to be counted explicitly rather than read off
+// the shared_ptr use count, because a use count reaching zero and the
+// matching ~SDMountState() body running are two separate events.  Another
+// task can construct a new SDMountState in between, and without this
+// counter the still-pending destructor would then unmount the card that
+// the new owner considers mounted.  cached_mount would go on handing that
+// state to every later FluidPath, so the card would never be remounted and
+// all SD access would fail until the next reboot.
+static uint32_t sd_refcnt = 0;
+
+namespace {
+    // RAII so a throw while mounting cannot leak a mutex.
+    class LockGuard {
+        SemaphoreHandle_t _mutex;
+
+    public:
+        explicit LockGuard(SemaphoreHandle_t mutex) : _mutex(mutex) { xSemaphoreTake(_mutex, portMAX_DELAY); }
+        ~LockGuard() { xSemaphoreGive(_mutex); }
+        LockGuard(const LockGuard&)            = delete;
+        LockGuard& operator=(const LockGuard&) = delete;
+    };
 }
 
 // SDMountState manages SD card mount/unmount lifecycle
 // It is instantiated as a shared_ptr that is automatically
-// reference-counted.  The constructor is called on the
-// first instance, thus mounting the SD card.  The destructor
-// is called when the count goes to 0.
+// reference-counted.  The first instance to be constructed mounts
+// the SD card and the last one to be destroyed unmounts it.
 SDMountState::SDMountState() {
-    ensure_sd_locks();
-    xSemaphoreTake(sd_mount_lock, portMAX_DELAY);
-    auto ec = sd_mount();
-    xSemaphoreGive(sd_mount_lock);
-    if (ec) {
-        throw stdfs::filesystem_error { "Failed to mount SD card", ec };
+    LockGuard guard(sd_mount_mutex);
+    if (sd_refcnt == 0) {
+        auto ec = sd_mount();
+        if (ec) {
+            throw stdfs::filesystem_error { "Failed to mount SD card", ec };
+        }
     }
+    ++sd_refcnt;
 }
 
 SDMountState::~SDMountState() {
-    // Use 100ms timeout to avoid deadlock if operations are still in progress
-    //    if (xSemaphoreTake(sd_mount_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
-    if (xSemaphoreTake(sd_mount_lock, portMAX_DELAY)) {
+    LockGuard guard(sd_mount_mutex);
+    if (sd_refcnt && --sd_refcnt == 0) {
         sd_unmount();
-        xSemaphoreGive(sd_mount_lock);
     }
 }
 
@@ -104,8 +130,7 @@ const std::string FluidPath::canonPath(std::string_view filename, const Volume& 
 
 FluidPath::FluidPath(const std::string_view name, const Volume& fs, std::error_code* ecptr) : stdfs::path(canonPath(name, fs)) {
     auto mount = *(++begin());  // Use the path iterator to get the first component
-    ensure_sd_locks();
-    _isSD = mount == "sd";
+    _isSD      = mount == "sd";
 
     if (_isSD) {
         if (!config->_sdCard->config_ok) {
@@ -117,10 +142,12 @@ FluidPath::FluidPath(const std::string_view name, const Volume& fs, std::error_c
             throw stdfs::filesystem_error { "SD card is inaccessible", name, ec };
         }
         try {
+            // Hold sd_cache_mutex across the test and the construction, so that
+            // two tasks cannot both find cached_mount expired and race to mount.
+            LockGuard guard(sd_cache_mutex);
             // Try to reuse existing mount state if another FluidPath still owns it
-            static std::weak_ptr<SDMountState> cached_mount;
-            if (auto mount = cached_mount.lock()) {
-                _sd_mount_state = mount;
+            if (auto cached = cached_mount.lock()) {
+                _sd_mount_state = cached;
             } else {
                 _sd_mount_state = std::make_shared<SDMountState>();
                 cached_mount    = _sd_mount_state;
