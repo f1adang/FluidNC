@@ -154,7 +154,18 @@ namespace Configuration {
     }
     void JsonGenerator::item(const char* name, step_engine*& value) {
         enter(name);
-        _encoder.begin_webui(_currentPath, "B", value->name);
+        // The current value has to be the index of the selected option rather
+        // than its name, otherwise WebUI cannot match it against the option
+        // list below and shows the wrong engine as selected.
+        int32_t selected_val = 0;
+        for (size_t index = 0; index < step_engines.size(); ++index) {
+            if (step_engines[index] == value) {
+                selected_val = index;
+                break;
+            }
+        }
+
+        _encoder.begin_webui(_currentPath, "B", selected_val);
         _encoder.begin_array("O");
 
         for (size_t index = 0; index < step_engines.size(); ++index) {
