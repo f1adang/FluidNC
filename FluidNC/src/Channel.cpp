@@ -39,6 +39,18 @@ Channel::Channel(const char* name, objnum_t num, bool addCR) : _name(name) {
     _addCR   = addCR;
 }
 
+// _queue_mutex is created by the member initializer in the class definition,
+// so it has to be destroyed here.  Channels are created and destroyed
+// dynamically - one WebClient per HTTP command, one WSChannel per WebSocket
+// connection - so leaking a FreeRTOS mutex per channel steadily drains the
+// heap while a job runs.
+Channel::~Channel() {
+    if (_queue_mutex) {
+        vSemaphoreDelete(_queue_mutex);
+        _queue_mutex = nullptr;
+    }
+}
+
 bool Channel::try_acquire_log_ref() {
     if (_closing.load(std::memory_order_acquire)) {
         return false;
