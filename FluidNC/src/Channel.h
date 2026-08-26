@@ -92,6 +92,7 @@ protected:
     std::atomic<uint32_t> _queued_log_refs { 0 };
     std::atomic<uint32_t> _processing_refs { 0 };
     std::atomic<bool>     _closing { false };
+    bool                  _queue_overflow_reported = false;
 
 public:
     explicit Channel(const std::string& name, bool addCR = false);
@@ -188,6 +189,14 @@ public:
     virtual void autoReport();
     void         autoReportGCodeState();
 
+    // Input that arrives while something else - a job, typically - owns the
+    // line-processing path is queued here until the job finishes.  A sender is
+    // told to stop at 256 bytes via rx_buffer_available(); this cap is what
+    // happens to a sender that does not listen.  It has to exist: a job can run
+    // for hours, and an unbounded queue is a slow heap exhaustion that ends in
+    // a panic mid-cut.
+    static constexpr size_t maxQueued = 1024;
+
     void push(uint8_t byte);
     void push(const uint8_t* data, size_t length) {
         while (length--) {
@@ -229,12 +238,16 @@ public:
     void pause();
     void resume();
 
-    bool     try_acquire_log_ref();
-    void     release_log_ref();
-    bool     try_acquire_processing_ref();
-    void     release_processing_ref();
-    void     begin_closing();
-    bool     is_closing() const;
+    bool try_acquire_log_ref();
+    void release_log_ref();
+    bool try_acquire_processing_ref();
+    void release_processing_ref();
+    void begin_closing();
+    bool is_closing() const;
+
+    // Append to the input queue, dropping the byte if the queue is at its cap.
+    // Returns false if the byte was dropped.
+    bool     queue_byte(uint8_t byte);
     uint32_t pending_log_refs() const;
     uint32_t pending_processing_refs() const;
 };
