@@ -127,9 +127,12 @@ namespace WebUI {
     // Any unread buffer will be cleared after that.
     void WebClient::detachWS() {
         xSemaphoreTake(xBufferLock, portMAX_DELAY);
+        // Setting this first unblocks a write() that is waiting for a reader,
+        // so the command finishes and clears "done".  The wait is deliberately
+        // unbounded: the background task is still using this object, and it
+        // holds no reference that would stop the channel from being reaped.
         _silent = true;
         while (!done) {
-            //done = true;
             xSemaphoreGive(xBufferLock);
             delay(1);
             xSemaphoreTake(xBufferLock, portMAX_DELAY);
@@ -199,6 +202,16 @@ namespace WebUI {
         xSemaphoreGive(xBufferLock);
     }
 
+    // How long a write waits for the HTTP reader to drain the buffer before
+    // giving up on it.  A client that vanished - WiFi dropped, browser closed
+    // - is not reported as disconnected until AsyncTCP gives up on the
+    // connection, which can take far longer than this.  Until then the wait
+    // blocks whichever task produced the output.  While a job is running that
+    // is the protocol task, which is subscribed to the task watchdog and feeds
+    // it only between GCode lines, so an unbounded wait here reboots the
+    // controller and takes the job with it.  Discard the output instead.
+    static const uint32_t WRITE_STALL_TIMEOUT_MS = 2000;
+
     size_t WebClient::write(const uint8_t* buffer, size_t length) {
         if (_silent || !_active) {
             return length;
@@ -206,12 +219,18 @@ namespace WebUI {
         xSemaphoreTake(xBufferLock, portMAX_DELAY);
         if (_buflen + length > _allocsize) {
             if (_allocsize >= BUFLEN) {
-                while (_buflen + length > _allocsize && !_silent && _active) {
+                uint32_t wait_start = millis();
+                while (_buflen + length > _allocsize && !_silent && _active && !is_closing()) {
+                    if ((millis() - wait_start) > WRITE_STALL_TIMEOUT_MS) {
+                        log_info_to(Console, "Web client is not reading; discarding its output");
+                        _silent = true;
+                        break;
+                    }
                     xSemaphoreGive(xBufferLock);
                     delay(1);
                     xSemaphoreTake(xBufferLock, portMAX_DELAY);
                 }
-                if (_silent || !_active) {
+                if (_silent || !_active || is_closing()) {
                     xSemaphoreGive(xBufferLock);
                     return length;
                 }
