@@ -177,12 +177,16 @@ static void poll_once() {
             activeChannel = pollChannels(activeLine);
         } else {
             if (state_is(State::Alarm) || state_is(State::ConfigAlarm) || state_is(State::Critical)) {
-                log_debug("Unwinding from Alarm");
+                // A job disappearing deserves an explanation at a level the
+                // user actually sees, naming what stopped it.
+                log_error("Job aborted in state " << state_name() << " by alarm " << static_cast<int>(lastAlarm) << " ("
+                                                  << alarmString(lastAlarm) << ")");
                 Job::abort();
                 unwind_cause = nullptr;
                 return;
             }
             if (unwind_cause) {
+                log_error("Job aborted by " << const_cast<const char*>(unwind_cause));
                 Job::abort();
                 unwind_cause = nullptr;
                 return;
@@ -205,15 +209,18 @@ static void poll_once() {
                     break;
                 case Error::Eof:
                     notifyf("Job done", "%s job sent", channel->name());
-                    log_debug(channel->name() << " job sent");
+                    // Info, not debug: "why did my job stop?" is answered by
+                    // either this line or the error below, and a message
+                    // nobody sees answers nothing.
+                    log_info(channel->name() << " job sent");
                     Job::unnest();
                     break;
                 default:
-                    if (auto leader = Job::leader()) {
-                        log_error_to(*leader,
-                                     static_cast<int>(status) << " (" << errorString(status) << ") in " << channel->name() << " at line "
-                                                              << channel->lineNumber());
-                    }
+                    // To every channel rather than just the job's leader, which
+                    // may itself be gone - that is exactly the case where the
+                    // user most needs to know why the job ended.
+                    log_error(static_cast<int>(status)
+                              << " (" << errorString(status) << ") in " << channel->name() << " at line " << channel->lineNumber());
                     Job::abort();
                     break;
             }
