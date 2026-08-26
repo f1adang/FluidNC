@@ -141,9 +141,27 @@ TaskHandle_t pollingTask = nullptr;
 char activeLine[Channel::maxLine];
 
 bool pollingPaused = false;
+// $Console/ReportInterval is applied here rather than at startup so it can be
+// turned on while a job is already running - which is exactly when someone
+// wants to watch what the machine is doing on the serial console.
+static void sync_console_report_interval() {
+    static int32_t applied = -1;
+    int32_t        wanted  = console_report_interval ? console_report_interval->get() : 0;
+    if (wanted != applied) {
+        applied = wanted;
+        Console.setReportInterval(wanted);
+        if (wanted) {
+            log_info("Console status reports every " << wanted << " ms");
+        } else {
+            log_info("Console status reports off");
+        }
+    }
+}
+
 // One pass of the polling loop.  Factored out of polling_loop() so that the
 // whole pass can be wrapped in a try block; "continue" becomes "return".
 static void poll_once() {
+    sync_console_report_interval();
 
     // Poll the input sources waiting for a complete line to arrive
     /*feedLoopWDT(), */ vTaskDelay(1);
