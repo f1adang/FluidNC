@@ -18,6 +18,8 @@ IntSetting* status_mask;
 
 IntSetting* sd_fallback_cs;
 
+IntSetting* console_report_interval;
+
 EnumSetting* message_level;
 
 const enum_opt_t messageLevels = {
@@ -101,6 +103,9 @@ void make_settings() {
     status_mask = new IntSetting("What to include in status report", GRBL, WG, "10", "Report/Status", 1, 0, 3);
 
     sd_fallback_cs = new IntSetting("SD CS pin if not configured", EXTENDED, WG, NULL, "SD/FallbackCS", -1, -1, 40);
+
+    console_report_interval =
+        new IntSetting("Status report interval on the console, ms, 0 for none", EXTENDED, WG, NULL, "Console/ReportInterval", 0, 0, 10000);
 
     build_info = new StringSetting("OEM build info for $I command", EXTENDED, WG, NULL, "Firmware/Build", "", 0, 20);
 
