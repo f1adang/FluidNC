@@ -99,6 +99,9 @@ void Job::restore() {
 void Job::nest(Channel* in_channel, Channel* out_channel) {
     JobLock lock;
     auto source = new JobSource(in_channel);
+    // At info level so that the console records when a job starts, giving the
+    // "job sent" or "Job aborted" line at the other end something to pair with.
+    log_info("Job started: " << in_channel->name() << (job.empty() ? "" : " (nested)"));
     if (out_channel && job.empty()) {
         // Hold a processing reference for the duration of the job.  A leader
         // can die while the job runs - a WebSocket or an HTTP client
