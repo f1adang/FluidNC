@@ -59,6 +59,9 @@ void Job::restore() {
 }
 void Job::nest(Channel* in_channel, Channel* out_channel) {
     auto source = new JobSource(in_channel);
+    // At info level so that the console records when a job starts, giving the
+    // "job sent" or "Job aborted" line at the other end something to pair with.
+    log_info("Job started: " << in_channel->name() << (job.empty() ? "" : " (nested)"));
     if (out_channel && job.empty()) {
         release_leader();
         // If the reference cannot be taken, the channel is already on its way
