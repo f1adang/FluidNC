@@ -198,8 +198,8 @@ void polling_loop(void* unused) {
                         Job::unnest();
                         break;
                     default:
-                        if (Job::leader) {
-                            log_error_to(*Job::leader,
+                        if (auto leader = Job::leader()) {
+                            log_error_to(*leader,
                                          static_cast<int>(status) << " (" << errorString(status) << ") in " << channel->name()
                                                                   << " at line " << channel->lineNumber());
                         }
@@ -283,7 +283,8 @@ void protocol_main_loop() {
                 report_echo_line_received(activeLine, allChannels);
             }
 
-            Channel* out_channel = Job::leader ? Job::leader : activeChannel;
+            Channel* leader      = Job::leader();
+            Channel* out_channel = leader ? leader : activeChannel;
 
             Error status_code = execute_line(activeLine, *out_channel, AuthenticationLevel::LEVEL_GUEST);
 

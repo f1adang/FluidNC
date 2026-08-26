@@ -42,10 +42,20 @@ public:
 
 class Job {
 private:
+    // The channel that launched the outermost job.  Job output - "ok",
+    // error reports and the like - goes there instead of to the job's own
+    // input channel.  It is private because it must be read via leader(),
+    // which copes with the channel going away while the job runs.
+    static Channel* _leader;
+
     static void pop();
+    static void release_leader();
 
 public:
-    static Channel* leader;
+    // The channel to which job output should be sent, or nullptr if there
+    // is none.  A job outlives its leader: a WebSocket leader disappears as
+    // soon as WiFi connectivity is lost, and that must not stop the job.
+    static Channel* leader();
 
     static bool active();
 
