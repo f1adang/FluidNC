@@ -27,3 +27,7 @@ void restart() {
 bool restart_was_panic() {
     return false;
 }
+
+const char* restart_reason() {
+    return "Host process start";
+}
