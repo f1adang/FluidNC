@@ -22,6 +22,7 @@
 #    include "FluidPath.h"
 
 #    include "Driver/localfs.h"
+#    include "Driver/restart.h"  // restart_reason()
 
 #    include "ToolChangers/atc.h"
 
@@ -53,6 +54,10 @@ void setup() {
         make_coordinates();
 
         log_info("FluidNC " << git_info << " " << git_url);
+        // Print this unconditionally.  When a job stops for no apparent reason
+        // the first thing to establish is whether the board restarted under it,
+        // and if so whether it was a firmware fault, a watchdog or a brownout.
+        log_info("Restart reason: " << restart_reason());
 
         if (localfs_mount()) {
             log_info("Local filesystem is " << LocalFS.prefix);
