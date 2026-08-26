@@ -83,3 +83,14 @@ extern "C" void rp2040_clear_last_panic_backtrace() {
     _panic_seen = false;
     _panic_bt   = {};
 }
+
+const char* restart_reason() {
+    load_panic_info();
+    if (_panic_seen) {
+        return "Panic";
+    }
+    if (watchdog_caused_reboot()) {
+        return "Watchdog";
+    }
+    return "Power on";
+}
