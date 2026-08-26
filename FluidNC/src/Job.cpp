@@ -7,7 +7,34 @@
 
 std::vector<JobSource*> job;
 
-Channel* Job::leader = nullptr;
+Channel* Job::_leader = nullptr;
+
+// Job output goes to the channel that launched the job, not to the job's own
+// input channel.  That leader channel can die while the job is still running -
+// a WebSocket disappears as soon as WiFi connectivity is lost - so we hold a
+// processing reference to it for the duration of the job.  The reference keeps
+// the channel object alive, hence the leader pointer valid, until we are done
+// with it; writes to a channel that is closing are discarded by the channel
+// itself.  Without the reference the channel would be deleted out from under
+// the job, and the resulting use of freed memory would crash the controller
+// mid-job.
+void Job::release_leader() {
+    if (_leader) {
+        _leader->release_processing_ref();
+        _leader = nullptr;
+    }
+}
+
+Channel* Job::leader() {
+    if (_leader && _leader->is_closing()) {
+        // Stop reporting to a channel that has gone away, but keep the job
+        // running.  Losing e.g. the WebUI connection is not a reason to
+        // abandon a job that is already underway.
+        log_info("Job output channel " << _leader->name() << " closed; the job continues");
+        release_leader();
+    }
+    return _leader;
+}
 
 bool Job::active() {
     return !job.empty();
@@ -33,7 +60,12 @@ void Job::restore() {
 void Job::nest(Channel* in_channel, Channel* out_channel) {
     auto source = new JobSource(in_channel);
     if (out_channel && job.empty()) {
-        leader = out_channel;
+        release_leader();
+        // If the reference cannot be taken, the channel is already on its way
+        // out, so the job runs without a leader rather than with a stale one.
+        if (out_channel->try_acquire_processing_ref()) {
+            _leader = out_channel;
+        }
     }
     job.push_back(source);
 }
@@ -42,7 +74,7 @@ void Job::pop() {
     job.pop_back();
     delete source;
     if (!active()) {
-        leader = nullptr;
+        release_leader();
     }
 }
 void Job::unnest() {
