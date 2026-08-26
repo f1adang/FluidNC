@@ -144,7 +144,10 @@ bool pollingPaused = false;
 // turned on while a job is already running - which is exactly when someone
 // wants to watch what the machine is doing on the serial console.
 static void sync_console_report_interval() {
-    static int32_t applied = -1;
+    // Starts at 0 because that is what the console's interval actually is until
+    // something sets it - so a board with the setting at its default says
+    // nothing at startup, and only a real change is worth a line.
+    static int32_t applied = 0;
     int32_t        wanted  = console_report_interval ? console_report_interval->get() : 0;
     if (wanted != applied) {
         applied = wanted;
