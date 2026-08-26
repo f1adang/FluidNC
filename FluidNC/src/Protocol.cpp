@@ -22,7 +22,9 @@
 #include "Job.h"
 #include "Driver/restart.h"
 #include "Driver/watchdog.h"
-#include "Driver/heap.h"  // platform_max_free_block()
+#include "Driver/heap.h"     // platform_max_free_block()
+#include "Driver/Console.h"  // Console
+#include <cstdio>            // snprintf
 
 volatile ExecAlarm lastAlarm;  // The most recent alarm code
 
@@ -279,6 +281,21 @@ static void alarm_msg(ExecAlarm alarm_code) {
 
 const uint32_t heapWarnThreshold = 15000;
 
+// Deliberately allocation-free.  This fires when the heap is nearly gone, and
+// the normal logging path builds a std::string to do its work.  At the point
+// where that allocation fails, the runtime cannot allocate the std::bad_alloc
+// object either, so it calls std::terminate() outright and no catch block can
+// intervene - the warning that you are about to run out of memory must not be
+// the thing that finishes you off.  Straight to the console for the same
+// reason: whatever is consuming the heap is often the network stack.
+static void report_low_memory(uint32_t bytes) {
+    char msg[48];
+    int  len = snprintf(msg, sizeof(msg), "[MSG:WARN: Low memory: %u bytes]\n", static_cast<unsigned>(bytes));
+    if (len > 0) {
+        Console.write(reinterpret_cast<const uint8_t*>(msg), static_cast<size_t>(len));
+    }
+}
+
 uint32_t heapLowWater           = UINT_MAX;
 uint32_t heapLowWaterReported   = UINT_MAX;
 int32_t  heapLowWaterReportTime = 0;
@@ -373,7 +390,7 @@ void protocol_main_loop() {
             // This prevents a cycle where the reporting itself consumes some heap and triggers another
             // report, but the true minimum is reported eventually, and large drops are reported immediately.
             if ((heapLowWater < heapLowWaterReported - 2048) || (ticksSinceReported > tickLimit)) {
-                //                log_warn("Low memory: " << heapLowWater << " bytes");
+                report_low_memory(heapLowWater);
                 heapLowWaterReported   = heapLowWater;
                 heapLowWaterReportTime = getCpuTicks();
             }
