@@ -193,7 +193,13 @@ static void poll_once() {
             auto status  = channel->pollLine(activeLine);
             switch (status) {
                 case Error::Ok:
-                    activeChannel = channel;
+                    // The reference must be taken here, because the protocol
+                    // task releases one when it has processed the line.
+                    // Without it that release underflows the count on every
+                    // line of every job.
+                    if (channel->try_acquire_processing_ref()) {
+                        activeChannel = channel;
+                    }
                     break;
                 case Error::NoData:
                     break;
