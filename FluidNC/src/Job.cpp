@@ -112,6 +112,9 @@ void Job::nest(Channel* in_channel, Channel* out_channel, Channel* ack_channel) 
     if (ack_channel) {
         source->set_pending_ack(ack_channel);
     }
+    // At info level so that the console records when a job starts, giving the
+    // "job sent" or "Job aborted" line at the other end something to pair with.
+    log_info("Job started: " << in_channel->name() << (job.empty() ? "" : " (nested)"));
     if (out_channel && job.empty()) {
         // Hold a processing reference for the duration of the job.  A leader
         // can die while the job runs - a WebSocket or an HTTP client
@@ -198,6 +201,9 @@ bool Job::consume_unwind_cause() {
         if (!unwind_cause) {
             return false;
         }
+        // Named here rather than at the call site: the cause is cleared under this
+        // same lock, so this is the last place it can still be read.
+        log_error("Job aborted by " << const_cast<const char*>(unwind_cause));
         while (active_nl()) {
             pop(acks_owed);
         }
