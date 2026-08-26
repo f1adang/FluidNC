@@ -108,18 +108,24 @@ void output_loop(void* unused) {
         // Block until a message is received
         LogMessage message;
         if (xQueueReceive(message_queue, &message, 100)) {  // Use timeout to check exit flag
-            if (!message.channel->is_closing()) {
-                if (message.isString) {
-                    std::string* s = static_cast<std::string*>(message.line);
-                    message.channel->print_msg(message.level, s->c_str());
-                    delete s;
-                } else {
-                    const char* cp = static_cast<const char*>(message.line);
-                    message.channel->print_msg(message.level, cp);
+            // Sending can throw - std::bad_alloc when the heap is exhausted,
+            // for instance.  Drop the message rather than letting the
+            // exception escape the task and terminate the controller, but
+            // always release the reference so the channel can be reaped.
+            try {
+                if (!message.channel->is_closing()) {
+                    if (message.isString) {
+                        std::string* s = static_cast<std::string*>(message.line);
+                        message.channel->print_msg(message.level, s->c_str());
+                        delete s;
+                    } else {
+                        const char* cp = static_cast<const char*>(message.line);
+                        message.channel->print_msg(message.level, cp);
+                    }
+                } else if (message.isString) {
+                    delete static_cast<std::string*>(message.line);
                 }
-            } else if (message.isString) {
-                delete static_cast<std::string*>(message.line);
-            }
+            } catch (...) {}
             message.channel->release_log_ref();
         }
     }
@@ -132,80 +138,104 @@ TaskHandle_t pollingTask = nullptr;
 char activeLine[Channel::maxLine];
 
 bool pollingPaused = false;
+// One pass of the polling loop.  Factored out of polling_loop() so that the
+// whole pass can be wrapped in a try block; "continue" becomes "return".
+static void poll_once() {
+
+    // Poll the input sources waiting for a complete line to arrive
+    /*feedLoopWDT(), */ vTaskDelay(1);
+    // Polling is paused when xmodem is using a channel for binary upload
+    if (pollingPaused) {
+        feed_watchdog();
+        vTaskDelay(100);
+        return;
+    }
+
+    // Polling without an argument checks for realtime characters
+    // Polling with an argument both checks for realtime characters and
+    // returns a line-oriented command if one is ready.
+    pollChannels();
+    for (auto const& module : Modules()) {
+        module->poll();
+        feed_watchdog();
+    }
+
+    // If activeChannel is non-null, it means that we have received a line
+    // but the task running protocol_main_loop() has not yet picked it up.
+    // activeChannel is thus a form of flow control between the protocol
+    // task that processes GCode lines and other events and this task that
+    // handles IO from channels.
+    if (!activeChannel) {
+        // Job channels have priority
+        if (!Job::active()) {
+            unwind_cause = nullptr;
+            // No job channel is active, so poll all of the serial-style
+            // channels to see if one has a line ready.
+            activeChannel = pollChannels(activeLine);
+        } else {
+            if (state_is(State::Alarm) || state_is(State::ConfigAlarm) || state_is(State::Critical)) {
+                log_debug("Unwinding from Alarm");
+                Job::abort();
+                unwind_cause = nullptr;
+                return;
+            }
+            if (unwind_cause) {
+                Job::abort();
+                unwind_cause = nullptr;
+                return;
+            }
+            // A job channel is active, so accept line-oriented input only
+            // from the job channel on top of the job stack.
+            auto channel = Job::channel();
+            auto status  = channel->pollLine(activeLine);
+            switch (status) {
+                case Error::Ok:
+                    activeChannel = channel;
+                    break;
+                case Error::NoData:
+                    break;
+                case Error::Eof:
+                    notifyf("Job done", "%s job sent", channel->name());
+                    log_debug(channel->name() << " job sent");
+                    Job::unnest();
+                    break;
+                default:
+                    if (auto leader = Job::leader()) {
+                        log_error_to(*leader,
+                                     static_cast<int>(status) << " (" << errorString(status) << ") in " << channel->name() << " at line "
+                                                              << channel->lineNumber());
+                    }
+                    Job::abort();
+                    break;
+            }
+        }
+    }
+}
+
+// Reporting allocates, so if the heap is what failed this can throw again.
+// Swallow that too - an exception escaping the polling task is fatal.
+static void report_poll_exception(const char* what) {
+    try {
+        log_error("Polling error: " << what << ", free heap " << xPortGetFreeHeapSize());
+    } catch (...) {}
+}
+
+// A job must survive a transient failure in the IO machinery.  Losing WiFi
+// can squeeze the heap hard enough that an ordinary std::string allocation
+// throws std::bad_alloc, and an exception escaping a raw FreeRTOS task calls
+// std::terminate(), which panics the controller and kills the job along with
+// it.  Catch here instead: report it and take another pass.  Motion planning
+// and stepping do not allocate, so the job keeps running.
 void polling_loop(void* unused) {
     add_watchdog_to_task();
     for (;;) {
         if (should_exit()) {
             break;
         }
-
-        // Poll the input sources waiting for a complete line to arrive
-        /*feedLoopWDT(), */ vTaskDelay(1);
-        // Polling is paused when xmodem is using a channel for binary upload
-        if (pollingPaused) {
-            feed_watchdog();
-            vTaskDelay(100);
-            continue;
-        }
-
-        // Polling without an argument checks for realtime characters
-        // Polling with an argument both checks for realtime characters and
-        // returns a line-oriented command if one is ready.
-        pollChannels();
-        for (auto const& module : Modules()) {
-            module->poll();
-            feed_watchdog();
-        }
-
-        // If activeChannel is non-null, it means that we have received a line
-        // but the task running protocol_main_loop() has not yet picked it up.
-        // activeChannel is thus a form of flow control between the protocol
-        // task that processes GCode lines and other events and this task that
-        // handles IO from channels.
-        if (!activeChannel) {
-            // Job channels have priority
-            if (!Job::active()) {
-                unwind_cause = nullptr;
-                // No job channel is active, so poll all of the serial-style
-                // channels to see if one has a line ready.
-                activeChannel = pollChannels(activeLine);
-            } else {
-                if (state_is(State::Alarm) || state_is(State::ConfigAlarm) || state_is(State::Critical)) {
-                    log_debug("Unwinding from Alarm");
-                    Job::abort();
-                    unwind_cause = nullptr;
-                    continue;
-                }
-                if (unwind_cause) {
-                    Job::abort();
-                    unwind_cause = nullptr;
-                    continue;
-                }
-                // A job channel is active, so accept line-oriented input only
-                // from the job channel on top of the job stack.
-                auto channel = Job::channel();
-                auto status  = channel->pollLine(activeLine);
-                switch (status) {
-                    case Error::Ok:
-                        activeChannel = channel;
-                        break;
-                    case Error::NoData:
-                        break;
-                    case Error::Eof:
-                        notifyf("Job done", "%s job sent", channel->name());
-                        log_debug(channel->name() << " job sent");
-                        Job::unnest();
-                        break;
-                    default:
-                        if (auto leader = Job::leader()) {
-                            log_error_to(*leader,
-                                         static_cast<int>(status) << " (" << errorString(status) << ") in " << channel->name()
-                                                                  << " at line " << channel->lineNumber());
-                        }
-                        Job::abort();
-                        break;
-                }
-            }
+        try {
+            poll_once();
+        } catch (const std::exception& ex) { report_poll_exception(ex.what()); } catch (...) {
+            report_poll_exception("unknown exception");
         }
     }
 }
@@ -220,22 +250,22 @@ void start_polling() {
     if (pollingTask) {
         vTaskResume(pollingTask);
     } else {
-        xTaskCreateAffinitySet(polling_loop,      // task
-                                "poller",          // name for task
-                                8192,              // size of task stack
-                                0,                 // parameters
-                                1,                 // priority
-                                (1 << SUPPORT_TASK_CORE),  // affinity mask
-                                &pollingTask       // task handle
+        xTaskCreateAffinitySet(polling_loop,              // task
+                               "poller",                  // name for task
+                               8192,                      // size of task stack
+                               0,                         // parameters
+                               1,                         // priority
+                               (1 << SUPPORT_TASK_CORE),  // affinity mask
+                               &pollingTask               // task handle
         );
         xTaskCreateAffinitySet(output_loop,  // task
-                                "output",     // name for task
-                                16000,
-                                // 8192,              // size of task stack
-                                0,                 // parameters
-                                2,                 // priority
-                                (1 << SUPPORT_TASK_CORE),  // affinity mask
-                                &outputTask        // task handle
+                               "output",     // name for task
+                               16000,
+                               // 8192,              // size of task stack
+                               0,                         // parameters
+                               2,                         // priority
+                               (1 << SUPPORT_TASK_CORE),  // affinity mask
+                               &outputTask                // task handle
         );
     }
 }
