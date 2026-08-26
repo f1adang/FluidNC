@@ -59,7 +59,7 @@ protected:
     char        _lastWasCR     = false;
 
     mutable SemaphoreHandle_t _queue_mutex = xSemaphoreCreateMutex();
-    std::queue<uint8_t> _queue;
+    std::queue<uint8_t>       _queue;
 
     uint32_t _reportInterval = 0;
     int32_t  _nextReportTime = 0;
@@ -73,9 +73,9 @@ protected:
     std::string _lastPinString    = "";
 
     bool       _reportState = true;
-    bool       _reportOvr = true;
-    bool       _reportWco = true;
-    CoordIndex _reportNgc = CoordIndex::End;
+    bool       _reportOvr   = true;
+    bool       _reportWco   = true;
+    CoordIndex _reportNgc   = CoordIndex::End;
 
     Cmd _last_rt_cmd = Cmd::None;
 
@@ -87,11 +87,12 @@ protected:
     bool _percent = false;
 
 protected:
-    bool _active = true;
-    bool _paused = false;
+    bool                  _active = true;
+    bool                  _paused = false;
     std::atomic<uint32_t> _queued_log_refs { 0 };
     std::atomic<uint32_t> _processing_refs { 0 };
     std::atomic<bool>     _closing { false };
+    bool                  _queue_overflow_reported = false;
 
 public:
     explicit Channel(const std::string& name, bool addCR = false);
@@ -177,6 +178,14 @@ public:
     virtual void autoReport();
     void         autoReportGCodeState();
 
+    // Input that arrives while something else - a job, typically - owns the
+    // line-processing path is queued here until the job finishes.  A sender is
+    // told to stop at 256 bytes via rx_buffer_available(); this cap is what
+    // happens to a sender that does not listen.  It has to exist: a job can run
+    // for hours, and an unbounded queue is a slow heap exhaustion that ends in
+    // a panic mid-cut.
+    static constexpr size_t maxQueued = 1024;
+
     void push(uint8_t byte);
     void push(const uint8_t* data, size_t length) {
         while (length--) {
@@ -218,12 +227,16 @@ public:
     void pause();
     void resume();
 
-    bool     try_acquire_log_ref();
-    void     release_log_ref();
-    bool     try_acquire_processing_ref();
-    void     release_processing_ref();
-    void     begin_closing();
-    bool     is_closing() const;
+    bool try_acquire_log_ref();
+    void release_log_ref();
+    bool try_acquire_processing_ref();
+    void release_processing_ref();
+    void begin_closing();
+    bool is_closing() const;
+
+    // Append to the input queue, dropping the byte if the queue is at its cap.
+    // Returns false if the byte was dropped.
+    bool     queue_byte(uint8_t byte);
     uint32_t pending_log_refs() const;
     uint32_t pending_processing_refs() const;
 };

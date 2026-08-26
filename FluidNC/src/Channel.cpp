@@ -118,6 +118,7 @@ void Channel::flushRx() {
     while (_queue.size()) {
         _queue.pop();
     }
+    _queue_overflow_reported = false;
     xSemaphoreGive(_queue_mutex);
 }
 
@@ -305,17 +306,33 @@ void Channel::handleRealtimeCharacter(uint8_t ch) {
     execute_realtime_command(static_cast<Cmd>(cmd), *this);
 }
 
+bool Channel::queue_byte(uint8_t byte) {
+    xSemaphoreTake(_queue_mutex, portMAX_DELAY);
+    if (_queue.size() >= maxQueued) {
+        bool report              = !_queue_overflow_reported;
+        _queue_overflow_reported = true;
+        xSemaphoreGive(_queue_mutex);
+        if (report) {
+            // To the console, because the channel that is overflowing is by
+            // definition not keeping up with us.
+            log_warn_to(Console, "Input queue full on " << name() << "; discarding input until it drains");
+        }
+        return false;
+    }
+    _queue.push(byte);
+    xSemaphoreGive(_queue_mutex);
+    return true;
+}
+
 void Channel::push(uint8_t byte) {
     if (is_realtime_command(byte)) {
         handleRealtimeCharacter(byte);
     } else {
-        xSemaphoreTake(_queue_mutex, portMAX_DELAY);
-        _queue.push(byte);
-        xSemaphoreGive(_queue_mutex);
+        queue_byte(byte);
     }
 }
-static int  _cnt = 10;
-Error       Channel::pollLine(char* line) {
+static int _cnt = 10;
+Error      Channel::pollLine(char* line) {
     if (_paused) {
         return Error::Ok;
     }
@@ -324,7 +341,7 @@ Error       Channel::pollLine(char* line) {
         if (_cnt) {
             --_cnt;
         }
-        int32_t ch = -1;
+        int32_t ch     = -1;
         uint8_t queued = 0;
         if (line && try_pop_queued_byte(queued)) {
             ch = queued;
@@ -340,9 +357,10 @@ Error       Channel::pollLine(char* line) {
             continue;
         }
         if (!line) {
-            xSemaphoreTake(_queue_mutex, portMAX_DELAY);
-            _queue.push(ch);
-            xSemaphoreGive(_queue_mutex);
+            // No line buffer to fill, so stash the character for whoever polls
+            // us with one later.  This is the path taken for every channel
+            // while a job holds the line-processing path.
+            queue_byte(ch);
             continue;
         }
         // Fall through if line is non-null and it is not a realtime character
