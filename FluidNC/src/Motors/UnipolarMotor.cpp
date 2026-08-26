@@ -14,8 +14,9 @@
 #include "UnipolarMotor.h"
 
 #include "Machine/MachineConfig.h"
-#include "Stepping.h"     // Stepping::assignMotorDriver()
-#include "string_util.h"  // starts_with_ignore_case()
+#include "Stepping.h"             // Stepping::assignMotorDriver()
+#include "Driver/fluidnc_gpio.h"  // gpio_write()
+#include "string_util.h"          // starts_with_ignore_case()
 
 using namespace Machine;
 
@@ -25,6 +26,12 @@ namespace MotorDrivers {
         _pin_phase1.setAttr(Pin::Attr::Output);
         _pin_phase2.setAttr(Pin::Attr::Output);
         _pin_phase3.setAttr(Pin::Attr::Output);
+        // Resolve the native GPIO numbers once, here, where touching flash is
+        // fine.  step() runs in the ISR and uses these directly.
+        _gpio_phase[0] = _pin_phase0.getNative(Pin::Capabilities::Output);
+        _gpio_phase[1] = _pin_phase1.getNative(Pin::Capabilities::Output);
+        _gpio_phase[2] = _pin_phase2.getNative(Pin::Capabilities::Output);
+        _gpio_phase[3] = _pin_phase3.getNative(Pin::Capabilities::Output);
         _current_phase = 0;
         config_message();
 
@@ -60,10 +67,18 @@ namespace MotorDrivers {
     }
 
     void IRAM_ATTR UnipolarMotor::set_direction(bool dir) {
+        set_direction_isr(dir);
+    }
+
+    void IRAM_ATTR UnipolarMotor::set_direction_isr(bool dir) {
         _dir = dir;
     }
 
     void IRAM_ATTR UnipolarMotor::step() {
+        step_isr();
+    }
+
+    void IRAM_ATTR UnipolarMotor::step_isr() {
         if (!_enabled) {
             return;  // don't do anything, phase is not changed or lost
         }
@@ -98,10 +113,29 @@ namespace MotorDrivers {
 
         const uint32_t pattern = sequence >> (_current_phase * 4);
 
-        _pin_phase0.write((pattern & 1) != 0);
-        _pin_phase1.write((pattern & 2) != 0);
-        _pin_phase2.write((pattern & 4) != 0);
-        _pin_phase3.write((pattern & 8) != 0);
+        gpio_write(_gpio_phase[0], (pattern & 1) != 0);
+        gpio_write(_gpio_phase[1], (pattern & 2) != 0);
+        gpio_write(_gpio_phase[2], (pattern & 4) != 0);
+        gpio_write(_gpio_phase[3], (pattern & 8) != 0);
+    }
+
+    // These thunks stand in for virtual calls from the step ISR, so they have to
+    // be in IRAM like the methods they forward to.  Lambdas would express the
+    // same thing, but the compiler emits their bodies into flash, which is what
+    // this whole arrangement exists to avoid.  UnipolarMotor is final, so the
+    // forwarded calls resolve directly instead of through the vtable.
+    static void IRAM_ATTR unipolar_step_thunk(MotorDriver* driver) {
+        static_cast<UnipolarMotor*>(driver)->step_isr();
+    }
+    static void IRAM_ATTR unipolar_dir_thunk(MotorDriver* driver, bool dir) {
+        static_cast<UnipolarMotor*>(driver)->set_direction_isr(dir);
+    }
+
+    IsrStepFn UnipolarMotor::isr_step_fn() {
+        return unipolar_step_thunk;
+    }
+    IsrDirFn UnipolarMotor::isr_dir_fn() {
+        return unipolar_dir_thunk;
     }
 
     // Configuration registration

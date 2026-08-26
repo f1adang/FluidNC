@@ -6,7 +6,7 @@
 #include "MotorDriver.h"
 
 namespace MotorDrivers {
-    class UnipolarMotor : public MotorDriver {
+    class UnipolarMotor final : public MotorDriver {
     public:
         UnipolarMotor(const char* name) : MotorDriver(name) {}
 
@@ -17,6 +17,16 @@ namespace MotorDrivers {
         void set_disable(bool disable) override;
         void set_direction(bool dir) override;
         void step() override;
+
+        // The ISR path calls these directly, not through the vtable.  They are
+        // non-virtual on purpose: whether a virtual call gets devirtualised is
+        // the optimiser's choice, and a vtable read from the step ISR is a
+        // flash access that panics the board when the cache is disabled.
+        void step_isr();
+        void set_direction_isr(bool dir);
+
+        IsrStepFn isr_step_fn() override;
+        IsrDirFn  isr_dir_fn() override;
 
         // Configuration handlers:
         void validate() override;
@@ -61,8 +71,15 @@ namespace MotorDrivers {
         Pin     _pin_phase3;
         uint8_t _current_phase = 0;
         bool    _half_step     = true;
-        bool    _enabled       = false;
-        bool    _dir           = true;
+
+        // Native GPIO numbers for the four phase pins, resolved in init().
+        // step() writes them with gpio_write() rather than through Pin, whose
+        // write() dispatches through a PinDetail vtable that lives in flash -
+        // not safe to touch from the step ISR.  validate() has already required
+        // these to be gpio pins.
+        pinnum_t _gpio_phase[4] = { INVALID_PINNUM, INVALID_PINNUM, INVALID_PINNUM, INVALID_PINNUM };
+        bool     _enabled       = false;
+        bool     _dir           = true;
 
     protected:
         void config_message() override;

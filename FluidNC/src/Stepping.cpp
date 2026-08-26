@@ -86,6 +86,10 @@ void Stepping::assignMotorDriver(axis_t axis, motor_t motor, MotorDrivers::Motor
     auto m                   = new motor_pins_t {};
     axis_motors[axis][motor] = m;
     m->driver                = driver;
+    // Resolved here, with the flash cache enabled, so that step() need not read
+    // the driver's vtable out of flash while running as an interrupt handler.
+    m->step_fn = driver->isr_step_fn();
+    m->dir_fn  = driver->isr_dir_fn();
 }
 
 steps_t Stepping::axis_steps[MAX_N_AXIS] = { 0 };
@@ -140,7 +144,9 @@ void IRAM_ATTR Stepping::step(AxisMask step_mask, AxisMask dir_mask) {
                     auto m = axis_motors[axis][motor];
                     if (m) {
                         if (m->driver) {
-                            m->driver->set_direction(dir);
+                            if (m->dir_fn) {
+                                m->dir_fn(m->driver, dir);
+                            }
                         } else {
                             _engine->set_dir_pin(m->dir_pin, dir ^ m->dir_invert);
                         }
@@ -164,7 +170,9 @@ void IRAM_ATTR Stepping::step(AxisMask step_mask, AxisMask dir_mask) {
                 auto m = axis_motors[axis][motor];
                 if (m && !m->blocked && !m->limited) {
                     if (m->driver) {
-                        m->driver->step();
+                        if (m->step_fn) {
+                            m->step_fn(m->driver);
+                        }
                     } else {
                         _engine->set_step_pin(m->step_pin, !m->step_invert);
                     }
