@@ -26,6 +26,13 @@
 #include <cstdint>
 
 namespace MotorDrivers {
+    class MotorDriver;
+
+    // Plain function pointers used in place of virtual calls from the step ISR;
+    // see isr_step_fn() below.  Repeated in Stepping.h.
+    using IsrStepFn = void (*)(MotorDriver*);
+    using IsrDirFn  = void (*)(MotorDriver*, bool);
+
     class MotorDriver : public Configuration::Configurable {
         const char* _name;
 
@@ -76,6 +83,17 @@ namespace MotorDrivers {
         // step() advances the motor by one step in the current direction.
         virtual void step();
 
+        // Calling the two methods above through the vtable is not safe from the
+        // step ISR: the vtable is in flash, and the ISR can run while the flash
+        // cache is disabled.  A driver that does its own stepping therefore also
+        // supplies plain function pointers, which Stepping caches in RAM at
+        // registration time and calls instead.  The functions they point at must
+        // be IRAM_ATTR and must not touch flash themselves.
+        // Null unless the driver does its own stepping; Stepping checks before
+        // calling, so a driver that uses step/dir pins need not supply them.
+        virtual IsrStepFn isr_step_fn() { return nullptr; }
+        virtual IsrDirFn  isr_dir_fn() { return nullptr; }
+
         // this is used to configure and test motors. This would be used for Trinamic
         virtual void config_motor() {}
 
@@ -113,7 +131,7 @@ namespace MotorDrivers {
         //   tables can be indexed by these variables.
         // TODO Architecture: It might be useful to cache a
         // reference to the axis settings entry.
-        axis_t axis_index() const;       // X_AXIS, etc
+        axis_t  axis_index() const;       // X_AXIS, etc
         motor_t dual_axis_index() const;  // motor number 0 or 1
     };
 
