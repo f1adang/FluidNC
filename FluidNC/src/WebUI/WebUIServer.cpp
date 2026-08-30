@@ -1229,6 +1229,15 @@ namespace WebUI {
 #endif
 
     void WebUI_Server::handleFileOps(AsyncWebServerRequest* request, const Volume& fs) {
+        // Every filesystem operation reachable from here - delete, rename,
+        // mkdir, stat, listing - can block for a long time on a slow card, with
+        // no point inside it at which the watchdog could be fed.  This runs on
+        // the network task, which the watchdog watches, so a slow card used to
+        // reboot the controller instead of just taking a while.  Step out of
+        // watchdog supervision for the request; the guard covers the many early
+        // returns below.
+        WatchdogSuspension no_wdt;
+
         //this is only for admin and user
         if (is_authenticated() == AuthenticationLevel::LEVEL_GUEST) {
             _upload_status = UploadStatus::NONE;
