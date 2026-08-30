@@ -16,6 +16,11 @@ private:
     int32_t  _report_interval_ms = 0;
     uint32_t _last_greeting_ms   = 0;
 
+    // Set when a complete command line arrives, which is the first solid
+    // evidence that something is actually listening and talking back.  A
+    // received byte is not evidence: line noise at power-up produces those.
+    bool _peer_spoke = false;
+
     static constexpr int _ack_timeout = 2000;
 
 public:
