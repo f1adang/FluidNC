@@ -5,6 +5,7 @@
 #include "Driver/Console.h"
 #include "Machine/MachineConfig.h"  // config
 #include "Serial.h"                 // allChannels
+#include "Report.h"                 // report_realtime_status
 
 UartChannel::UartChannel(objnum_t num, bool addCR) : Channel("uart_channel", num, addCR) {
     _lineedit = new Lineedit(this, _line, Channel::maxLine - 1);
@@ -72,13 +73,23 @@ void UartChannel::handle() {
     // Repeating the greeting until the port answers costs a few bytes a second
     // on a dedicated UART and lets a late starter synchronise promptly.  It
     // also covers a pendant plugged in after FluidNC has booted.
-    if (_active || !_report_interval_ms) {
+    // Gate on having received a whole command line, not on _active.  _active is
+    // set by any received byte, and line noise at power-up - or anything
+    // getExpanderId() hands to the queue - sets it before the pendant has said
+    // a word, which would switch the greeting off precisely when it is needed.
+    if (_peer_spoke || !_report_interval_ms) {
         return;
     }
     if ((millis() - _last_greeting_ms) < greeting_repeat_ms) {
         return;
     }
     sendGreeting();
+
+    // Send a real status report as well.  The banner alone only says FluidNC
+    // restarted; a pendant waiting to see live data has something to work with
+    // straight away.  This is confined to a port that has a report interval
+    // configured and has not answered yet, so no other channel is affected.
+    report_realtime_status(*this);
 }
 
 // An IO expander answers the ID query immediately.  Waiting longer than this
@@ -174,6 +185,8 @@ bool UartChannel::realtimeOkay(char c) {
 
 bool UartChannel::lineComplete(char* line, char c) {
     if (_lineedit->step(c)) {
+        // A whole line arrived, so there is a real peer on this port.
+        _peer_spoke = true;
         _linelen        = _lineedit->finish();
         _line[_linelen] = '\0';
         strcpy(line, _line);
