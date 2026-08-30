@@ -14,6 +14,7 @@ private:
 
     uint32_t _uart_num           = 0;
     int32_t  _report_interval_ms = 0;
+    uint32_t _last_greeting_ms   = 0;
 
     static constexpr int _ack_timeout = 2000;
 
@@ -22,6 +23,11 @@ public:
 
     void init() override;
     void init(Uart* uart);
+
+    // Called from Channel::pollLine() on every poll; used to re-announce
+    // ourselves until the device on the other end shows signs of life.
+    void handle() override;
+    void sendGreeting();
 
     // Print methods (Stream inherits from Print)
     size_t write(uint8_t c) override;
