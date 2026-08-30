@@ -20,15 +20,11 @@ void UartChannel::init() {
     } else {
         init(uart);
     }
-    // Two reasons to start out active, i.e. willing to send without having
-    // heard anything first:
-    //   - No rx pin, so nothing will ever arrive to set this true.
-    //   - A configured report interval, which means the config author put a
-    //     listener on this port.  A pendant that only listens would otherwise
-    //     never be sent anything, because _active is set by receiving.
+    // _active means "this port has shown signs of life", and is otherwise set
+    // only by receiving.  With no rx pin nothing ever will, so start active.
     // The uart can be null here if it is missing from the config; dereferencing
     // it unconditionally used to crash during startup.
-    if (!uart || uart->_rxd_pin.undefined() || _report_interval_ms) {
+    if (!uart || uart->_rxd_pin.undefined()) {
         _active = true;
     }
     setReportInterval(_report_interval_ms);
@@ -45,14 +41,44 @@ void UartChannel::init(Uart* uart) {
     } else {
         log_info(name() << " created");
     }
+    sendGreeting();
+    if (_uart_num) {
+        getExpanderId();
+    }
+}
+
+void UartChannel::sendGreeting() {
     // Tell the channel listener that FluidNC has restarted.
     // The initial newline clears out any garbage characters that might have
     // resulted from the UART initialization and turn-on
     print("\n");
     out("RST", "MSG:");
-    if (_uart_num) {
-        getExpanderId();
+    _last_greeting_ms = millis();
+}
+
+// How often to repeat the greeting while the port has not answered.
+static const uint32_t greeting_repeat_ms = 1000;
+
+void UartChannel::handle() {
+    // A device that powers up alongside FluidNC - a pendant, typically - is
+    // often not listening yet when init() sends the greeting, and misses it.
+    // FluidNC then says nothing more: autoReport() only sends a time-based
+    // report while the machine is moving, so an idle machine produces no
+    // traffic at all.  The device waits for data before introducing itself,
+    // FluidNC waits to be spoken to, and the standoff lasts until something
+    // unrelated happens to emit a log line.  That is the "long delay after
+    // powerup, and only once it received any data" behaviour.
+    //
+    // Repeating the greeting until the port answers costs a few bytes a second
+    // on a dedicated UART and lets a late starter synchronise promptly.  It
+    // also covers a pendant plugged in after FluidNC has booted.
+    if (_active || !_report_interval_ms) {
+        return;
     }
+    if ((millis() - _last_greeting_ms) < greeting_repeat_ms) {
+        return;
+    }
+    sendGreeting();
 }
 
 // An IO expander answers the ID query immediately.  Waiting longer than this
