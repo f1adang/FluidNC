@@ -1506,13 +1506,31 @@ namespace WebUI {
             std::error_code ec;
             FluidPath       filepath { pathname, LocalFS, ec };
 
-            // Closing flushes the final buffer to the card, which is another
+            // Closing flushes the final buffer to the media, which is another
             // potentially long stall on the watchdog-subscribed async_tcp task.
             feed_watchdog();
+            // Ask whether the data actually landed.  write() fills a stdio
+            // buffer and reports success for bytes that have not been written
+            // yet, so a filesystem that fills up mid-upload is not visible
+            // until this flush.  Ignoring it produced a file that stopped
+            // half way while the browser was told the upload succeeded.
+            bool written_completely = _uploadFile->close();
             delete _uploadFile;
             _uploadFile = nullptr;
             feed_watchdog();
             log_debug("pathname " << pathname);
+
+            if (!written_completely) {
+                _upload_status = UploadStatus::FAILED;
+                log_info("Upload failed - could not write the whole file");
+                pushError(request, ESP_ERROR_FILE_WRITE, "Upload failed, file not completely written");
+                // A truncated file is worse than none: half a preferences.json
+                // is not something WebUI can read back.
+                std::error_code rm_ec;
+                stdfs::remove(pathname, rm_ec);
+                HashFS::rehash_file(pathname);
+                return;
+            }
 
             if (ec) {
                 _upload_status = UploadStatus::FAILED;
