@@ -3,6 +3,16 @@
 
 #include "wdt.h"
 #include "esp_task_wdt.h"
+
+// ESP-IDF v5 spells this CONFIG_ESP_TASK_WDT_EN; v4.x, which this build uses,
+// spells it CONFIG_ESP_TASK_WDT.  Testing only the v5 name made every function
+// in this file compile to an empty body: feed_watchdog() fed nothing and
+// add_watchdog_to_task() subscribed nothing, so FluidNC's whole task-watchdog
+// layer was inert while the watchdog itself was very much enabled.  Accept
+// either spelling.
+#if defined(CONFIG_ESP_TASK_WDT_EN) || defined(CONFIG_ESP_TASK_WDT)
+#    define FLUIDNC_TASK_WDT_ENABLED 1
+#endif
 #include <freertos/FreeRTOS.h>
 #include "Config.h"
 #include <esp_idf_version.h>
@@ -32,7 +42,7 @@ static void get_wdt_task_handle() {
 
 // cppcheck-suppress unusedFunction
 void enable_core0_WDT() {
-#ifdef CONFIG_ESP_TASK_WDT_EN
+#ifdef FLUIDNC_TASK_WDT_ENABLED
     if (!wdt_task_handle) {
         return;
     }
@@ -45,7 +55,7 @@ void enable_core0_WDT() {
 
 // cppcheck-suppress unusedFunction
 void disable_core0_WDT() {
-#ifdef CONFIG_ESP_TASK_WDT_EN
+#ifdef FLUIDNC_TASK_WDT_ENABLED
     get_wdt_task_handle();
     if (!wdt_task_handle) {
         return;
@@ -58,7 +68,7 @@ void disable_core0_WDT() {
 }
 
 void feed_watchdog() {
-#ifdef CONFIG_ESP_TASK_WDT_EN
+#ifdef FLUIDNC_TASK_WDT_ENABLED
     // esp_task_wdt_reset() logs an error ("task not found") if the current
     // task isn't subscribed to the TWDT, instead of silently no-opping.
     // FluidNC's watchdog is opt-in (see add_watchdog_to_task()), and several
@@ -78,7 +88,7 @@ void feed_watchdog() {
 static thread_local bool wdt_was_subscribed = false;
 
 void suspend_watchdog_for_task() {
-#ifdef CONFIG_ESP_TASK_WDT_EN
+#ifdef FLUIDNC_TASK_WDT_ENABLED
     wdt_was_subscribed = esp_task_wdt_status(NULL) == ESP_OK;
     if (wdt_was_subscribed) {
         esp_task_wdt_delete(NULL);
@@ -87,7 +97,7 @@ void suspend_watchdog_for_task() {
 }
 
 void resume_watchdog_for_task() {
-#ifdef CONFIG_ESP_TASK_WDT_EN
+#ifdef FLUIDNC_TASK_WDT_ENABLED
     if (wdt_was_subscribed) {
         esp_task_wdt_add(NULL);
         esp_task_wdt_reset();
@@ -97,7 +107,7 @@ void resume_watchdog_for_task() {
 }
 
 void add_watchdog_to_task() {
-#ifdef CONFIG_ESP_TASK_WDT_EN
+#ifdef FLUIDNC_TASK_WDT_ENABLED
     esp_task_wdt_add(NULL);  // NULL means current task
 #endif
 }
