@@ -3,6 +3,16 @@
 
 #include "wdt.h"
 #include "esp_task_wdt.h"
+
+// ESP-IDF v5 spells this CONFIG_ESP_TASK_WDT_EN; v4.x, which this build uses,
+// spells it CONFIG_ESP_TASK_WDT.  Testing only the v5 name made every function
+// in this file compile to an empty body: feed_watchdog() fed nothing and
+// add_watchdog_to_task() subscribed nothing, so FluidNC's whole task-watchdog
+// layer was inert while the watchdog itself was very much enabled.  Accept
+// either spelling.
+#if defined(CONFIG_ESP_TASK_WDT_EN) || defined(CONFIG_ESP_TASK_WDT)
+#    define FLUIDNC_TASK_WDT_ENABLED 1
+#endif
 #include <freertos/FreeRTOS.h>
 #include "Config.h"
 #include <esp_idf_version.h>
@@ -87,7 +97,7 @@ void feed_watchdog() {
 static thread_local bool wdt_was_subscribed = false;
 
 void suspend_watchdog_for_task() {
-#ifdef CONFIG_ESP_TASK_WDT_EN
+#ifdef FLUIDNC_TASK_WDT_ENABLED
     wdt_was_subscribed = esp_task_wdt_status(NULL) == ESP_OK;
     if (wdt_was_subscribed) {
         esp_task_wdt_delete(NULL);
@@ -96,7 +106,7 @@ void suspend_watchdog_for_task() {
 }
 
 void resume_watchdog_for_task() {
-#ifdef CONFIG_ESP_TASK_WDT_EN
+#ifdef FLUIDNC_TASK_WDT_ENABLED
     if (wdt_was_subscribed) {
         esp_task_wdt_add(NULL);
         esp_task_wdt_reset();
