@@ -20,8 +20,16 @@ void UartChannel::init() {
     } else {
         init(uart);
     }
-    if (uart->_rxd_pin.undefined()) {
-        _active = true; // there will be no rx activity to set this true
+    // Two reasons to start out active, i.e. willing to send without having
+    // heard anything first:
+    //   - No rx pin, so nothing will ever arrive to set this true.
+    //   - A configured report interval, which means the config author put a
+    //     listener on this port.  A pendant that only listens would otherwise
+    //     never be sent anything, because _active is set by receiving.
+    // The uart can be null here if it is missing from the config; dereferencing
+    // it unconditionally used to crash during startup.
+    if (!uart || uart->_rxd_pin.undefined() || _report_interval_ms) {
+        _active = true;
     }
     setReportInterval(_report_interval_ms);
 }
@@ -47,11 +55,23 @@ void UartChannel::init(Uart* uart) {
     }
 }
 
+// An IO expander answers the ID query immediately.  Waiting longer than this
+// only delays startup, and the old loop had no overall bound at all: it ran for
+// as long as anything kept arriving.
+static const uint32_t expander_id_timeout_ms = 100;
+
 void UartChannel::getExpanderId() {
     out("ID", "EXP:");
-    char   buf[128];
-    size_t len;
-    while ((len = _uart->timedReadBytes(buf, 128, 50)) != 0) {
+
+    char     buf[128];
+    uint32_t start = millis();
+    while ((millis() - start) < expander_id_timeout_ms) {
+        // sizeof(buf) - 1 leaves room for the terminator.  Reading a full 128
+        // bytes used to write buf[128], one past the end.
+        size_t len = _uart->timedReadBytes(buf, sizeof(buf) - 1, 10);
+        if (!len) {
+            continue;
+        }
         buf[len] = '\0';
         if (strncmp(buf, "(EXP,", 5) == 0) {
             auto pos = strrchr(buf, ')');
@@ -60,7 +80,21 @@ void UartChannel::getExpanderId() {
             }
             print("ok\n");
             log_info("IO Expander " << &buf[5]);
+            return;
         }
+
+        // Not an expander, so this belongs to whatever is actually on the port -
+        // a pendant, typically, and very likely its opening message.  These reads
+        // bypass the channel, so anything dropped here is invisible to
+        // Channel::pollLine() and never sets _active.  Discarding it left the
+        // channel inactive and silent until the device happened to transmit
+        // again, which is why a pendant could take a long time to come up, or
+        // never come up at all.  Hand it to the normal input path instead;
+        // realtime characters are recognised when the bytes are dequeued.
+        for (size_t i = 0; i < len; i++) {
+            queue_byte(static_cast<uint8_t>(buf[i]));
+        }
+        _active = true;
     }
 }
 
