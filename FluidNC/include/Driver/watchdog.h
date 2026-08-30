@@ -8,3 +8,16 @@ void add_watchdog_to_task();
 // going briefly unsupervised.
 void suspend_watchdog_for_task();
 void resume_watchdog_for_task();
+
+#ifdef __cplusplus
+// RAII wrapper for the pair above.  Preferred over calling them directly,
+// because the code that needs this tends to have many early returns.
+class WatchdogSuspension {
+public:
+    WatchdogSuspension() { suspend_watchdog_for_task(); }
+    ~WatchdogSuspension() { resume_watchdog_for_task(); }
+
+    WatchdogSuspension(const WatchdogSuspension&)            = delete;
+    WatchdogSuspension& operator=(const WatchdogSuspension&) = delete;
+};
+#endif
