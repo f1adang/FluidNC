@@ -36,6 +36,11 @@ void UartChannel::init(Uart* uart) {
         return;
     }
     _uart = uart;
+    // A serial port with a report interval is a pendant or a sender, and it
+    // needs reports to keep coming while the machine is idle - that is the
+    // whole point of asking for an interval.  Browsers, which get an interval
+    // too, keep the on-change-only behaviour.
+    _report_when_idle = true;
     allChannels.registration(this);
     if (_report_interval_ms) {
         log_info(name() << " created at report interval: " << _report_interval_ms);

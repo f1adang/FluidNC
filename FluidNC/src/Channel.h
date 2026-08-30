@@ -61,6 +61,13 @@ protected:
     mutable SemaphoreHandle_t _queue_mutex = xSemaphoreCreateMutex();
     std::queue<uint8_t>       _queue;
 
+    // When set, the report interval is honoured whether or not the machine is
+    // moving.  Off by default: a status report only on change is enough for a
+    // browser, and costs nothing while the machine sits idle.  A serial device
+    // that asked for an interval is usually a pendant with a display, and it
+    // has nothing to show unless reports keep arriving.
+    bool _report_when_idle = false;
+
     uint32_t _reportInterval = 0;
     int32_t  _nextReportTime = 0;
 
