@@ -31,6 +31,7 @@
 #include "JSONEncoder.h"
 
 #include "HashFS.h"
+#include "Driver/watchdog.h"  // feed_watchdog()
 #include <cstdio>
 #include <list>
 #include <algorithm>
@@ -1427,6 +1428,13 @@ namespace WebUI {
 
     void WebUI_Server::uploadWrite(AsyncWebServerRequest* request, uint8_t* buffer, size_t length) {
         static uint32_t chunk_count = 0;
+        // This runs on the async_tcp task, which is subscribed to the task
+        // watchdog.  A single write can stall for a long time when stdio
+        // flushes a full buffer to a slow or ageing card, and yielding does not
+        // feed the watchdog - only the subscribed task resetting it does.  Feed
+        // it on every chunk so a slow card cannot reboot the controller in the
+        // middle of an upload.
+        feed_watchdog();
         if ((++chunk_count % UPLOAD_CHUNKS_PER_YIELD) == 0) {
             delay_ms(1);
         }
@@ -1464,8 +1472,12 @@ namespace WebUI {
             std::error_code ec;
             FluidPath       filepath { pathname, LocalFS, ec };
 
+            // Closing flushes the final buffer to the card, which is another
+            // potentially long stall on the watchdog-subscribed async_tcp task.
+            feed_watchdog();
             delete _uploadFile;
             _uploadFile = nullptr;
+            feed_watchdog();
             log_debug("pathname " << pathname);
 
             if (ec) {
