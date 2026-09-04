@@ -1,0 +1,12 @@
+# Name,   Type, SubType, Offset,  Size, Flags
+# As min_littlefs.csv, but with a 64K coredump partition taken from the end of
+# the app1 OTA slot.  nvs, app0 and spiffs keep their offsets and sizes, so an
+# existing filesystem - config.yaml, WebUI files - survives the change.
+# app1 shrinks 0x1E0000 -> 0x1D0000 (1920K -> 1856K), still larger than the
+# firmware, so OTA update continues to work.
+nvs,      data, nvs,       0x9000,  0x5000,
+otadata,  data, ota,       0xe000,  0x2000,
+app0,     app,  ota_0,    0x10000,0x1E0000,
+app1,     app,  ota_1,   0x1F0000,0x1D0000,
+coredump, data, coredump,0x3C0000, 0x10000,
+spiffs,   data, spiffs,  0x3D0000, 0x30000,
