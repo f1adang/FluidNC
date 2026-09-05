@@ -203,6 +203,9 @@ namespace WebUI {
         // deleted Channel.  Hold a processing reference until the background
         // task is finished with it.
         if (!try_acquire_processing_ref()) {
+            xSemaphoreTake(xBufferLock, portMAX_DELAY);
+            done = true;
+            xSemaphoreGive(xBufferLock);
             return;  // already closing; nothing would read the result
         }
         xSemaphoreTake(xBufferLock, portMAX_DELAY);
