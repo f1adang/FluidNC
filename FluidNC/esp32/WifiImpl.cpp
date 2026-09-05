@@ -2,6 +2,7 @@
 
 #if defined(ESP32) && __has_include(<esp_wifi.h>) && __has_include(<esp_ota_ops.h>) && __has_include(<esp_idf_version.h>)
 
+#    include "Driver/watchdog.h"  // feed_watchdog()
 #    include "../src/Settings.h"
 #    include "../src/JSONEncoder.h"
 #    include "../src/Channel.h"
@@ -374,7 +375,23 @@ namespace WebUI {
         }
 
         int32_t beginApListScan() override {
-            while (true) {
+            // This runs on loopTask, and a scan dwells about a second on each
+            // of the ~13 channels, so even a scan that succeeds takes far
+            // longer than the task watchdog timeout.  Nothing here used to feed
+            // the watchdog, and the loop had no way out, so opening the WebUI's
+            // scan dialog reset the board:
+            //
+            //   task_wdt: Task watchdog got triggered ... loopTask (CPU 1)
+            //   CPU 0: IDLE0   CPU 1: IDLE1
+            //
+            // Both cores idle because loopTask was parked in the delay below.
+            //
+            // Poll more often, feed the watchdog while waiting, and give up
+            // with an empty list rather than waiting forever.
+            const uint32_t poll_ms    = 100;
+            const uint32_t timeout_ms = 30000;
+
+            for (uint32_t waited = 0; waited < timeout_ms; waited += poll_ms) {
                 int32_t n = WiFi.scanComplete();
                 if (n >= 0) {
                     return n;
@@ -382,8 +399,11 @@ namespace WebUI {
                 if (n == WIFI_SCAN_FAILED) {
                     WiFi.scanNetworks(true, false, false, 1000);
                 }
-                delay(1000);
+                delay(poll_ms);
+                feed_watchdog();
             }
+            log_warn("WiFi scan did not finish within " << (timeout_ms / 1000) << "s; reporting an empty AP list");
+            return 0;
         }
 
         bool isApProtected(int index) const override { return WiFi.encryptionType(index) != WIFI_AUTH_OPEN; }
