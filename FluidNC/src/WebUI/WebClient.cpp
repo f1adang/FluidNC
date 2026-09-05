@@ -213,6 +213,7 @@ namespace WebUI {
         WebClient* _this = this;
         if (xQueueSend(WebClients::_background_task_queue, &_this, portTICK_PERIOD_MS * 100) != pdTRUE) {
             cmds.pop_back();
+            done = true;
             xSemaphoreGive(xBufferLock);
             release_processing_ref();
             log_error("WebClient: could not queue command for background execution");
