@@ -1,19 +1,39 @@
 #include "WifiImpl.h"
 
 #include <Arduino.h>  // delay()
+#include "Driver/watchdog.h"  // feed_watchdog()
+#include "../Logging.h"
 
 namespace WebUI {
     int32_t WifiImpl::beginApListScan() {
         // Block until a scan completes, driving the non-blocking primitives.
         // On platforms whose startApListScan() is itself synchronous this
         // returns after one pass.
-        for (;;) {
+        //
+        // The WebUI reaches ESP410 through the async path, but a console
+        // "$Wifi/ListAPs" still lands here, on the task that has to feed the
+        // task watchdog.  A scan dwells about a second on each of the ~13
+        // channels, so an unfed wait outlasts the watchdog even when the scan
+        // succeeds, and a scan that never reports Done would wait forever:
+        //
+        //   task_wdt: Task watchdog got triggered ... loopTask (CPU 1)
+        //   Tasks currently running:  CPU 0: IDLE0   CPU 1: IDLE1
+        //
+        // Both cores idle because the caller was parked in the delay below.
+        // Poll faster, feed the watchdog, and give up rather than hang.
+        const uint32_t poll_ms    = 100;
+        const uint32_t timeout_ms = 30000;
+
+        for (uint32_t waited = 0; waited < timeout_ms; waited += poll_ms) {
             startApListScan();
             if (apListScanState() == ApScanState::Done) {
                 return apListCount();
             }
-            delay(1000);
+            delay(poll_ms);
+            feed_watchdog();
         }
+        log_warn("WiFi scan did not finish within " << (timeout_ms / 1000) << "s; reporting an empty AP list");
+        return 0;
     }
 
     enum WiFiCountry {
