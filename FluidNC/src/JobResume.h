@@ -1,0 +1,59 @@
+// Copyright (c) 2026 - Gandalf van Schnaufenberg
+// Use of this source code is governed by a GPLv3 license that can be found in the LICENSE file.
+
+#pragma once
+
+#include "Config.h"
+#include <cstdint>
+#include <cstddef>
+#include <string>
+
+// Periodically records enough state to pick a long job back up after the power
+// goes out, and restores it on request.
+//
+// What is recorded is the state of the block the machine is *executing*, not
+// the state of the file reader.  Those are far apart: a line is read, queued,
+// parsed, planned, and only then stepped, so the read head runs ahead of the
+// cutter by the whole cmd_queue and planner buffer.  Checkpointing the read
+// head would resume past work that was never actually done.  plan_block_t
+// carries file_offset for exactly this reason.
+//
+// The offset stored is the *start* of the interrupted line, so resuming re-runs
+// it rather than skipping the part that never got cut.  Overlap is recoverable;
+// a gap is not.
+//
+// The machine cannot know where it is after a power cut, and this build does
+// not assume homing.  Resume therefore restores everything except position, and
+// requires the operator to have re-established zero first.
+namespace JobResume {
+    struct Checkpoint {
+        std::string path;      // job file, as given to $SD/Run
+        size_t      offset;    // byte offset to resume reading from
+        int32_t     line;      // N word if the file had one, else 0
+        uint32_t    file_size; // refuse to resume a file that has changed
+        float       mpos[MAX_N_AXIS];
+        float       coord_offset[MAX_N_AXIS];  // G92
+        uint8_t     coord_select;              // G54..G59
+        float       feed_rate;
+        float       spindle_speed;
+        uint8_t     spindle;
+        uint8_t     coolant;
+        uint8_t     units;
+        uint8_t     distance;
+        uint32_t    tool;
+    };
+
+    // Called from the main loop.  Cheap when there is nothing to do: it writes
+    // at most once per interval, and only while a job is actually running.
+    void poll();
+
+    // Drop the stored checkpoint - a job that finished has nothing to resume.
+    void clear();
+
+    // Most recent valid checkpoint, newest of the two slots. False if there is
+    // none, or if both slots fail their CRC.
+    bool read(Checkpoint& out);
+
+    // How often to write, in milliseconds. 0 disables checkpointing.
+    extern uint32_t interval_ms;
+}
