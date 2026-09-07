@@ -40,11 +40,14 @@ namespace JobResume {
         // Checkpoints live beside the job, on whatever volume the job came
         // from.  That volume is necessarily mounted while the job runs, and it
         // means a LocalFS job is checkpointed too rather than silently not.
+        // Match the mount prefixes, not the volume names: LocalFS mounts at
+        // /spiffs or /littlefs depending on what the flash holds, and a
+        // canonical path carries the prefix rather than the name "localfs".
         Volume* volume_of(const std::string& path) {
-            if (path.rfind("/" + std::string(SD.name) + "/", 0) == 0) {
+            if (!SD.prefix.empty() && path.rfind(SD.prefix + "/", 0) == 0) {
                 return &SD;
             }
-            if (path.rfind("/" + std::string(LocalFS.name) + "/", 0) == 0) {
+            if (!LocalFS.prefix.empty() && path.rfind(LocalFS.prefix + "/", 0) == 0) {
                 return &LocalFS;
             }
             return nullptr;
@@ -92,6 +95,7 @@ namespace JobResume {
         uint32_t s_seq          = 0;
         uint32_t s_last_write   = 0;
         bool     s_have_written = false;
+        bool     s_seq_primed   = false;
 
         bool load_slot(Volume& vol, int slot, Record& r) {
             std::error_code ec;
@@ -140,17 +144,32 @@ namespace JobResume {
             return;
         }
 
-        // The outermost job, not Job::channel(): during a nested macro that
-        // would checkpoint the macro, overwriting the record for the job the
-        // operator actually wants to come back to.
+        // One line per job saying what checkpointing is doing, including when
+        // it is doing nothing.  Every guard below used to return in silence,
+        // which is why "no checkpoint was written" gave nothing to work from.
+        static std::string last_job;
+        static bool        explained = false;
+
         Channel* job = Job::root_channel();
         if (!job) {
-            return;  // nothing running
+            last_job.clear();
+            return;  // idle: not worth a message
         }
+        if (job->path() != last_job) {
+            last_job  = job->path();
+            explained = false;
+            s_seq_primed = false;
+        }
+        auto explain = [&](const char* why) {
+            if (!explained) {
+                explained = true;
+                log_warn("Resume checkpoint not written for " << last_job << ": " << why);
+            }
+        };
 
         uint32_t now = millis();
         if (s_have_written && (now - s_last_write) < interval_ms) {
-            return;
+            return;  // simply not due yet
         }
 
         // The block the machine is executing now, which is what the recorded
@@ -158,25 +177,23 @@ namespace JobResume {
         // flight worth a checkpoint - the previous one still stands.
         plan_block_t* block = plan_get_current_block();
         if (!block) {
+            explain("no block is executing");
             return;
         }
 
-        Volume* vol = volume_of(job->name());
+        Volume* vol = volume_of(job->path());
         if (!vol) {
-            static bool complained = false;
-            if (!complained) {
-                complained = true;
-                log_warn("Resume checkpoint: no known volume in job path '" << job->name() << "'");
-            }
+            explain("job path names no known volume");
             return;
         }
 
-        // Continue the sequence already on the card rather than restarting at
+        // Continue the sequence already on the volume rather than restarting at
         // 1.  s_seq is zero after a reboot, and a power cut is exactly when a
         // reboot happens: without this, the first checkpoints of the next job
         // would be numbered below the stale ones still stored, and read() would
         // hand back the *old* job as the newer record.
-        if (!s_have_written) {
+        if (!s_seq_primed) {
+            s_seq_primed = true;
             for (int slot = 0; slot < 2; ++slot) {
                 Record prev;
                 if (load_slot(*vol, slot, prev) && prev.seq > s_seq) {
@@ -195,7 +212,7 @@ namespace JobResume {
         r.line    = block->line_number;
 
         r.file_size = job->size();
-        strncpy(r.path, job->name(), sizeof r.path - 1);
+        strncpy(r.path, job->path().c_str(), sizeof r.path - 1);
 
         float* mpos = get_mpos();
         float  wpos[MAX_N_AXIS];
@@ -217,26 +234,25 @@ namespace JobResume {
         r.spindle_speed = gc_state.spindle_speed;
         r.spindle       = static_cast<uint8_t>(gc_state.modal.spindle);
         // CoolantState is a two-bit field, not an integer; pack it by hand.
-        r.coolant       = (gc_state.modal.coolant.Mist ? 1 : 0) | (gc_state.modal.coolant.Flood ? 2 : 0);
-        r.units         = static_cast<uint8_t>(gc_state.modal.units);
-        r.distance      = static_cast<uint8_t>(gc_state.modal.distance);
-        r.tool          = gc_state.selected_tool;
-        r.crc           = record_crc(r);
+        r.coolant = (gc_state.modal.coolant.Mist ? 1 : 0) | (gc_state.modal.coolant.Flood ? 2 : 0);
+        r.units   = static_cast<uint8_t>(gc_state.modal.units);
+        r.distance = static_cast<uint8_t>(gc_state.modal.distance);
+        r.tool     = gc_state.selected_tool;
+        r.crc      = record_crc(r);
 
         // Alternate slots so the previous good record always survives.
         if (store(*vol, r, s_seq & 1)) {
             if (!s_have_written) {
-                log_info("Resume checkpoints being written for " << r.path);
+                log_info("Resume checkpoints being written for " << r.path << " on " << vol->name);
             }
             s_last_write   = now;
             s_have_written = true;
         } else {
-            // Do not retry every pass; a card that cannot be written now is
+            // Do not retry every pass; a volume that cannot be written now is
             // unlikely to recover within a few milliseconds, and hammering it
             // would slow the job down for nothing.
             s_last_write   = now;
             s_have_written = true;
-            log_warn("Resume checkpoint could not be written to " << slot_name[s_seq & 1] << " on " << vol->name);
         }
     }
 
@@ -303,6 +319,7 @@ namespace JobResume {
         }
         s_have_written = false;
         s_seq          = 0;
+        s_seq_primed   = false;
     }
 
     void describe(Channel& out) {
@@ -359,30 +376,12 @@ namespace JobResume {
         // Open first, so a missing or altered file is refused before anything
         // moves.  Resuming at a byte offset into a file that changed would drop
         // the reader into the middle of some unrelated line.
-        // Channel::name() gives the whole path, volume included - "/sd/job.gcode"
-        // or "/localfs/zero.g" - while InputFile wants a Volume plus the path
-        // within it.  Split the leading component back off rather than assuming
-        // SD, which would make a LocalFS job impossible to resume.
-        Volume*     vol = nullptr;
-        std::string rel = cp.path;
-        if (!rel.empty() && rel[0] == '/') {
-            size_t      slash = rel.find('/', 1);
-            std::string vname = rel.substr(1, (slash == std::string::npos) ? std::string::npos : slash - 1);
-            if (vname == SD.name) {
-                vol = &SD;
-            } else if (vname == LocalFS.name) {
-                vol = &LocalFS;
-            }
-            rel = (slash == std::string::npos) ? "/" : rel.substr(slash);
-        }
-        if (!vol) {
-            log_error_to(out, "Checkpoint path " << cp.path << " names no volume I know");
-            return Error::InvalidValue;
-        }
-
+        // cp.path is canonical - "/sd/job.gcode", "/spiffs/job.gcode" - and
+        // FluidPath::canonPath() resolves the volume from that prefix itself, so
+        // the default passed here does not matter and no manual split is needed.
         InputFile* file;
         try {
-            file = new InputFile(*vol, rel.c_str());
+            file = new InputFile(SD, cp.path.c_str());
         } catch (const ErrorException& ex) {
             log_error_to(out, "Cannot open " << cp.path << ": " << ex.what());
             return ex.error();
