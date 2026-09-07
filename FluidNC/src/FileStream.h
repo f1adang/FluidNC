@@ -43,7 +43,7 @@ public:
 
     FluidPath fpath() { return _fpath; }
 
-    std::string path();
+    std::string path() override;
     std::string name();
     int         available() override;
     int         read() override;
