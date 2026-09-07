@@ -370,7 +370,10 @@ static void poll_once() {
                             // answered by either this line or the error below,
                             // and a message nobody sees answers nothing.
                             log_info(channel->name() << " job sent");
-                            JobResume::clear();
+                            // Only discards a checkpoint that describes this
+                            // very file; a nested macro, or the operator's
+                            // re-zeroing macro, must not wipe it.
+                            JobResume::finished(channel->name());
                             Job::unnest();
                             break;
                         default: {
