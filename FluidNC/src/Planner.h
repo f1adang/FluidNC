@@ -38,6 +38,13 @@ struct plan_block_t {
     SpindleState spindle;      // Spindle enable state
     CoolantState coolant;      // Coolant state
     int32_t      line_number;  // Block line number for real-time reporting. Copied from pl_line_data.
+    // Byte offset of the line that produced this block, in the job file that was
+    // being read.  Unlike line_number - which is the N word, and is 0 for the
+    // many files that carry none - this is always meaningful.  Resume
+    // checkpoints read it off the *executing* block, so the recorded file
+    // position matches the recorded machine position: the read head runs ahead
+    // by the whole cmd_queue and planner buffer.
+    size_t       file_offset;
 
     // Fields used by the motion planner to manage acceleration. Some of these values may be updated
     // by the stepper module during execution of special motion cases for replanning purposes.
@@ -68,6 +75,7 @@ struct plan_line_data_t {
     CoolantState coolant;         // Coolant state
     int32_t      line_number;       // Desired line number to report when executing.
     bool         has_line_number;   // true if an explicit N-word set line_number (N0 is valid and distinct from "no N-word")
+    size_t       file_offset;       // Byte offset of the line that produced this block.
     bool         is_jog;            // true if this was generated due to a jog command
     bool         limits_checked;    // true if soft limits already checked
 
