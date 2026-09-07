@@ -8,6 +8,10 @@
 #include <cstddef>
 #include <string>
 
+#include "Error.h"
+
+class Channel;
+
 // Periodically records enough state to pick a long job back up after the power
 // goes out, and restores it on request.
 //
@@ -31,7 +35,8 @@ namespace JobResume {
         size_t      offset;    // byte offset to resume reading from
         int32_t     line;      // N word if the file had one, else 0
         uint32_t    file_size; // refuse to resume a file that has changed
-        float       mpos[MAX_N_AXIS];
+        float       mpos[MAX_N_AXIS];  // machine position - meaningless after a reboot without homing
+        float       wpos[MAX_N_AXIS];  // work position - what a re-zeroed machine can return to
         float       coord_offset[MAX_N_AXIS];  // G92
         uint8_t     coord_select;              // G54..G59
         float       feed_rate;
@@ -56,4 +61,13 @@ namespace JobResume {
 
     // How often to write, in milliseconds. 0 disables checkpointing.
     extern uint32_t interval_ms;
+
+    // Describe the stored checkpoint on `out`, or say there is none.
+    void describe(Channel& out);
+
+    // Restore modal state, move to the recorded work position and continue the
+    // job from the recorded offset.  Assumes the operator has already
+    // re-established work zero: without homing the controller cannot know where
+    // the tool is, so this trusts the current zero rather than pretending to.
+    Error resume(Channel& out);
 }
