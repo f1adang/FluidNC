@@ -55,6 +55,11 @@ namespace JobResume {
     // Drop the stored checkpoint - a job that finished has nothing to resume.
     void clear();
 
+    // Clear only if the stored checkpoint describes this file.  A job
+    // completing is not by itself a reason to discard someone else's
+    // checkpoint.
+    void finished(const std::string& path);
+
     // Most recent valid checkpoint, newest of the two slots. False if there is
     // none, or if both slots fail their CRC.
     bool read(Checkpoint& out);
