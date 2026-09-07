@@ -373,7 +373,7 @@ static void poll_once() {
                             // Only discards a checkpoint that describes this
                             // very file; a nested macro, or the operator's
                             // re-zeroing macro, must not wipe it.
-                            JobResume::finished(channel->name());
+                            JobResume::finished(channel->path());
                             Job::unnest();
                             break;
                         default: {
