@@ -69,7 +69,7 @@ public:
     size_t write(uint8_t c) override;
     size_t write(const uint8_t* buffer, size_t length) override;
 
-    size_t size();
+    size_t size() override;
     size_t position() override;
     void   set_position(size_t) override;
 
