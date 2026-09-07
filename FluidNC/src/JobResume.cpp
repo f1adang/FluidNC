@@ -148,7 +148,8 @@ namespace JobResume {
         // it is doing nothing.  Every guard below used to return in silence,
         // which is why "no checkpoint was written" gave nothing to work from.
         static std::string last_job;
-        static bool        explained = false;
+        static bool        explained    = false;
+        static uint32_t    job_seen_at  = 0;
 
         Channel* job = Job::root_channel();
         if (!job) {
@@ -156,18 +157,30 @@ namespace JobResume {
             return;  // idle: not worth a message
         }
         if (job->path() != last_job) {
-            last_job  = job->path();
-            explained = false;
+            last_job     = job->path();
+            explained    = false;
             s_seq_primed = false;
+            job_seen_at  = millis();
         }
-        auto explain = [&](const char* why) {
-            if (!explained) {
-                explained = true;
-                log_warn("Resume checkpoint not written for " << last_job << ": " << why);
-            }
-        };
+
+        // A job with no backing file - a startup line, a macro fed from a
+        // channel - has nothing to resume, and saying so every boot is noise.
+        if (last_job.empty()) {
+            return;
+        }
 
         uint32_t now = millis();
+
+        // Complain only about a job that has gone a long time with nothing
+        // written.  "No block is executing" is the normal state at the start of
+        // a job and between moves; reporting it immediately turned a transient
+        // into a warning that was followed one line later by success.
+        auto explain = [&](const char* why) {
+            if (!explained && !s_have_written && (now - job_seen_at) > 30000) {
+                explained = true;
+                log_warn("Resume checkpoint still not written for " << last_job << " after 30s: " << why);
+            }
+        };
         if (s_have_written && (now - s_last_write) < interval_ms) {
             return;  // simply not due yet
         }
