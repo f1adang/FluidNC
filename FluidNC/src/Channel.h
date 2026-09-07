@@ -278,6 +278,11 @@ public:
     // can be refused rather than resumed at a byte offset that now lands in
     // the middle of a different line.
     virtual size_t size() { return 0; }
+    // The canonical path of the backing file - "/sd/job.gcode" - for
+    // channels that have one.  name() is whatever string the caller
+    // happened to construct the channel with, which for a file opened as
+    // "/job.gcode" carries no volume at all.
+    virtual std::string path() { return ""; }
     virtual size_t position() { return 0; }
     virtual void   set_position(size_t pos) {}
 
