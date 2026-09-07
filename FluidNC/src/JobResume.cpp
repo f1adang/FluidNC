@@ -18,6 +18,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cerrno>
 #include <Arduino.h>  // millis()
 
 namespace JobResume {
@@ -114,15 +115,22 @@ namespace JobResume {
             std::error_code ec;
             FluidPath       fpath { slot_name[slot], vol, ec };
             if (ec) {
+                log_warn("Resume checkpoint: cannot reach " << vol.name << " (" << ec.message() << ")");
                 return false;
             }
+            errno    = 0;
             FILE* fd = fopen(fpath.string().c_str(), "wb");
             if (!fd) {
+                log_warn("Resume checkpoint: cannot create " << fpath.string() << " (" << strerror(errno) << ")");
                 return false;
             }
+            errno   = 0;
             bool ok = fwrite(&r, 1, sizeof r, fd) == sizeof r;
             ok      = (fflush(fd) == 0) && ok;
             ok      = (fclose(fd) == 0) && ok;
+            if (!ok) {
+                log_warn("Resume checkpoint: write to " << fpath.string() << " failed (" << strerror(errno) << ")");
+            }
             return ok;
         }
     }
@@ -155,7 +163,12 @@ namespace JobResume {
 
         Volume* vol = volume_of(job->name());
         if (!vol) {
-            return;  // not a file-backed job; nothing to checkpoint
+            static bool complained = false;
+            if (!complained) {
+                complained = true;
+                log_warn("Resume checkpoint: no known volume in job path '" << job->name() << "'");
+            }
+            return;
         }
 
         // Continue the sequence already on the card rather than restarting at
