@@ -28,7 +28,26 @@ namespace JobResume {
         // damage the slot being written; the other still holds the previous
         // good record, so there is always something to come back to.  This is
         // why the record is not simply rewritten in place.
-        const char* slot_path[2] = { "/sd/.fnc_resume0", "/sd/.fnc_resume1" };
+        // Names within a volume, not absolute paths.  FluidNC mounts SD on
+        // demand and unmounts it when the last SDMountState goes away, so a
+        // bare fopen("/sd/...") is only correct while somebody else happens to
+        // be holding the card - and fails outright when the job is on LocalFS.
+        // Every access below goes through a FluidPath, which holds the mount
+        // for as long as it is alive.
+        const char* slot_name[2] = { ".fnc_resume0", ".fnc_resume1" };
+
+        // Checkpoints live beside the job, on whatever volume the job came
+        // from.  That volume is necessarily mounted while the job runs, and it
+        // means a LocalFS job is checkpointed too rather than silently not.
+        Volume* volume_of(const std::string& path) {
+            if (path.rfind("/" + std::string(SD.name) + "/", 0) == 0) {
+                return &SD;
+            }
+            if (path.rfind("/" + std::string(LocalFS.name) + "/", 0) == 0) {
+                return &LocalFS;
+            }
+            return nullptr;
+        }
 
         constexpr uint32_t kMagic   = 0x464e4352;  // "FNCR"
         constexpr uint16_t kVersion = 2;  // v2 added wpos
@@ -73,8 +92,13 @@ namespace JobResume {
         uint32_t s_last_write   = 0;
         bool     s_have_written = false;
 
-        bool load_slot(int slot, Record& r) {
-            FILE* fd = fopen(slot_path[slot], "rb");
+        bool load_slot(Volume& vol, int slot, Record& r) {
+            std::error_code ec;
+            FluidPath       fpath { slot_name[slot], vol, ec };
+            if (ec) {
+                return false;
+            }
+            FILE* fd = fopen(fpath.string().c_str(), "rb");
             if (!fd) {
                 return false;
             }
@@ -86,8 +110,13 @@ namespace JobResume {
         // Writing opens a second descriptor while the job file holds the first.
         // sd_mount() allows enough for both plus a WebUI request; see the note
         // where max_files is chosen.
-        bool store(const Record& r, int slot) {
-            FILE* fd = fopen(slot_path[slot], "wb");
+        bool store(Volume& vol, const Record& r, int slot) {
+            std::error_code ec;
+            FluidPath       fpath { slot_name[slot], vol, ec };
+            if (ec) {
+                return false;
+            }
+            FILE* fd = fopen(fpath.string().c_str(), "wb");
             if (!fd) {
                 return false;
             }
@@ -124,6 +153,11 @@ namespace JobResume {
             return;
         }
 
+        Volume* vol = volume_of(job->name());
+        if (!vol) {
+            return;  // not a file-backed job; nothing to checkpoint
+        }
+
         // Continue the sequence already on the card rather than restarting at
         // 1.  s_seq is zero after a reboot, and a power cut is exactly when a
         // reboot happens: without this, the first checkpoints of the next job
@@ -132,7 +166,7 @@ namespace JobResume {
         if (!s_have_written) {
             for (int slot = 0; slot < 2; ++slot) {
                 Record prev;
-                if (load_slot(slot, prev) && prev.seq > s_seq) {
+                if (load_slot(*vol, slot, prev) && prev.seq > s_seq) {
                     s_seq = prev.seq;
                 }
             }
@@ -177,7 +211,7 @@ namespace JobResume {
         r.crc           = record_crc(r);
 
         // Alternate slots so the previous good record always survives.
-        if (store(r, s_seq & 1)) {
+        if (store(*vol, r, s_seq & 1)) {
             if (!s_have_written) {
                 log_info("Resume checkpoints being written for " << r.path);
             }
@@ -189,18 +223,23 @@ namespace JobResume {
             // would slow the job down for nothing.
             s_last_write   = now;
             s_have_written = true;
-            log_warn("Resume checkpoint could not be written to " << slot_path[s_seq & 1] << " - is the SD card present and writable?");
+            log_warn("Resume checkpoint could not be written to " << slot_name[s_seq & 1] << " on " << vol->name);
         }
     }
 
     bool read(Checkpoint& out) {
-        Record best;
-        bool   found = false;
-        for (int slot = 0; slot < 2; ++slot) {
-            Record r;
-            if (load_slot(slot, r) && (!found || r.seq > best.seq)) {
-                best  = r;
-                found = true;
+        // Nothing here knows which volume the job was on, so look on both and
+        // take the newest valid record found anywhere.
+        Volume* volumes[2] = { &SD, &LocalFS };
+        Record  best;
+        bool    found = false;
+        for (Volume* vol : volumes) {
+            for (int slot = 0; slot < 2; ++slot) {
+                Record r;
+                if (load_slot(*vol, slot, r) && (!found || r.seq > best.seq)) {
+                    best  = r;
+                    found = true;
+                }
             }
         }
         if (!found) {
@@ -239,8 +278,15 @@ namespace JobResume {
     }
 
     void clear() {
-        for (int slot = 0; slot < 2; ++slot) {
-            remove(slot_path[slot]);
+        Volume* volumes[2] = { &SD, &LocalFS };
+        for (Volume* vol : volumes) {
+            for (int slot = 0; slot < 2; ++slot) {
+                std::error_code ec;
+                FluidPath       fpath { slot_name[slot], *vol, ec };
+                if (!ec) {
+                    remove(fpath.string().c_str());
+                }
+            }
         }
         s_have_written = false;
         s_seq          = 0;
