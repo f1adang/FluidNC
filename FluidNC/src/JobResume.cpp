@@ -103,7 +103,10 @@ namespace JobResume {
             return;
         }
 
-        Channel* job = Job::channel();
+        // The outermost job, not Job::channel(): during a nested macro that
+        // would checkpoint the macro, overwriting the record for the job the
+        // operator actually wants to come back to.
+        Channel* job = Job::root_channel();
         if (!job) {
             return;  // nothing running
         }
@@ -175,6 +178,9 @@ namespace JobResume {
 
         // Alternate slots so the previous good record always survives.
         if (store(r, s_seq & 1)) {
+            if (!s_have_written) {
+                log_info("Resume checkpoints being written for " << r.path);
+            }
             s_last_write   = now;
             s_have_written = true;
         } else {
@@ -183,7 +189,7 @@ namespace JobResume {
             // would slow the job down for nothing.
             s_last_write   = now;
             s_have_written = true;
-            log_warn("Resume checkpoint could not be written");
+            log_warn("Resume checkpoint could not be written to " << slot_path[s_seq & 1] << " - is the SD card present and writable?");
         }
     }
 
@@ -219,6 +225,17 @@ namespace JobResume {
         out.distance      = best.distance;
         out.tool          = best.tool;
         return true;
+    }
+
+    // Clear only when the job the checkpoint describes is the one that
+    // finished.  Clearing on any job completion means the re-zeroing macro an
+    // operator runs before $Job/Resume - which is a job like any other - wipes
+    // the checkpoint it is about to be used with.
+    void finished(const std::string& path) {
+        Checkpoint cp;
+        if (read(cp) && cp.path == path) {
+            clear();
+        }
     }
 
     void clear() {
@@ -283,9 +300,30 @@ namespace JobResume {
         // Open first, so a missing or altered file is refused before anything
         // moves.  Resuming at a byte offset into a file that changed would drop
         // the reader into the middle of some unrelated line.
+        // Channel::name() gives the whole path, volume included - "/sd/job.gcode"
+        // or "/localfs/zero.g" - while InputFile wants a Volume plus the path
+        // within it.  Split the leading component back off rather than assuming
+        // SD, which would make a LocalFS job impossible to resume.
+        Volume*     vol = nullptr;
+        std::string rel = cp.path;
+        if (!rel.empty() && rel[0] == '/') {
+            size_t      slash = rel.find('/', 1);
+            std::string vname = rel.substr(1, (slash == std::string::npos) ? std::string::npos : slash - 1);
+            if (vname == SD.name) {
+                vol = &SD;
+            } else if (vname == LocalFS.name) {
+                vol = &LocalFS;
+            }
+            rel = (slash == std::string::npos) ? "/" : rel.substr(slash);
+        }
+        if (!vol) {
+            log_error_to(out, "Checkpoint path " << cp.path << " names no volume I know");
+            return Error::InvalidValue;
+        }
+
         InputFile* file;
         try {
-            file = new InputFile(SD, cp.path.c_str());
+            file = new InputFile(*vol, rel.c_str());
         } catch (const ErrorException& ex) {
             log_error_to(out, "Cannot open " << cp.path << ": " << ex.what());
             return ex.error();
