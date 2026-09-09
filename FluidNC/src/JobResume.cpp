@@ -29,28 +29,25 @@ namespace JobResume {
         // damage the slot being written; the other still holds the previous
         // good record, so there is always something to come back to.  This is
         // why the record is not simply rewritten in place.
-        // Names within a volume, not absolute paths.  FluidNC mounts SD on
+        // Names within the volume, not absolute paths.  FluidNC mounts SD on
         // demand and unmounts it when the last SDMountState goes away, so a
         // bare fopen("/sd/...") is only correct while somebody else happens to
-        // be holding the card - and fails outright when the job is on LocalFS.
-        // Every access below goes through a FluidPath, which holds the mount
-        // for as long as it is alive.
+        // be holding the card.  Every access below goes through a FluidPath,
+        // which holds the mount for as long as it is alive.
         const char* slot_name[2] = { ".fnc_resume0", ".fnc_resume1" };
 
-        // Checkpoints live beside the job, on whatever volume the job came
-        // from.  That volume is necessarily mounted while the job runs, and it
-        // means a LocalFS job is checkpointed too rather than silently not.
-        // Match the mount prefixes, not the volume names: LocalFS mounts at
-        // /spiffs or /littlefs depending on what the flash holds, and a
-        // canonical path carries the prefix rather than the name "localfs".
-        Volume* volume_of(const std::string& path) {
-            if (!SD.prefix.empty() && path.rfind(SD.prefix + "/", 0) == 0) {
-                return &SD;
-            }
-            if (!LocalFS.prefix.empty() && path.rfind(LocalFS.prefix + "/", 0) == 0) {
-                return &LocalFS;
-            }
-            return nullptr;
+        // Only jobs on the card are checkpointed, and the checkpoint lives
+        // beside them there.
+        //
+        // A job on LocalFS is a macro - a few lines of homing or tool change -
+        // and resuming one partway through is not a thing anybody wants.  Nor
+        // is it worth what it costs: LocalFS is the ESP32's own flash, so every
+        // checkpoint would be a flash erase/write cycle on a small partition
+        // shared with config.yaml and the WebUI, and each one stops the flash
+        // cache on both cores while the step ISR is running.  The card has none
+        // of those problems and is where long jobs live anyway.
+        bool on_sd(const std::string& path) {
+            return !SD.prefix.empty() && path.rfind(SD.prefix + "/", 0) == 0;
         }
 
         constexpr uint32_t kMagic   = 0x464e4352;  // "FNCR"
@@ -97,9 +94,9 @@ namespace JobResume {
         bool     s_have_written = false;
         bool     s_seq_primed   = false;
 
-        bool load_slot(Volume& vol, int slot, Record& r) {
+        bool load_slot(int slot, Record& r) {
             std::error_code ec;
-            FluidPath       fpath { slot_name[slot], vol, ec };
+            FluidPath       fpath { slot_name[slot], SD, ec };
             if (ec) {
                 return false;
             }
@@ -115,11 +112,11 @@ namespace JobResume {
         // Writing opens a second descriptor while the job file holds the first.
         // sd_mount() allows enough for both plus a WebUI request; see the note
         // where max_files is chosen.
-        bool store(Volume& vol, const Record& r, int slot) {
+        bool store(const Record& r, int slot) {
             std::error_code ec;
-            FluidPath       fpath { slot_name[slot], vol, ec };
+            FluidPath       fpath { slot_name[slot], SD, ec };
             if (ec) {
-                log_warn("Resume checkpoint: cannot reach " << vol.name << " (" << ec.message() << ")");
+                log_warn("Resume checkpoint: cannot reach the SD card (" << ec.message() << ")");
                 return false;
             }
             errno    = 0;
@@ -163,9 +160,11 @@ namespace JobResume {
             job_seen_at  = millis();
         }
 
-        // A job with no backing file - a startup line, a macro fed from a
-        // channel - has nothing to resume, and saying so every boot is noise.
-        if (last_job.empty()) {
+        // Only jobs on the card are checkpointed.  A job with no backing file
+        // is a startup line or a channel-fed macro, and a job on LocalFS is a
+        // macro too; neither is something anybody resumes partway through, and
+        // both are silent non-events rather than failures worth reporting.
+        if (last_job.empty() || !on_sd(last_job)) {
             return;
         }
 
@@ -194,13 +193,7 @@ namespace JobResume {
             return;
         }
 
-        Volume* vol = volume_of(job->path());
-        if (!vol) {
-            explain("job path names no known volume");
-            return;
-        }
-
-        // Continue the sequence already on the volume rather than restarting at
+        // Continue the sequence already on the card rather than restarting at
         // 1.  s_seq is zero after a reboot, and a power cut is exactly when a
         // reboot happens: without this, the first checkpoints of the next job
         // would be numbered below the stale ones still stored, and read() would
@@ -209,7 +202,7 @@ namespace JobResume {
             s_seq_primed = true;
             for (int slot = 0; slot < 2; ++slot) {
                 Record prev;
-                if (load_slot(*vol, slot, prev) && prev.seq > s_seq) {
+                if (load_slot(slot, prev) && prev.seq > s_seq) {
                     s_seq = prev.seq;
                 }
             }
@@ -254,14 +247,14 @@ namespace JobResume {
         r.crc      = record_crc(r);
 
         // Alternate slots so the previous good record always survives.
-        if (store(*vol, r, s_seq & 1)) {
+        if (store(r, s_seq & 1)) {
             if (!s_have_written) {
-                log_info("Resume checkpoints being written for " << r.path << " on " << vol->name);
+                log_info("Resume checkpoints being written for " << r.path);
             }
             s_last_write   = now;
             s_have_written = true;
         } else {
-            // Do not retry every pass; a volume that cannot be written now is
+            // Do not retry every pass; a card that cannot be written now is
             // unlikely to recover within a few milliseconds, and hammering it
             // would slow the job down for nothing.
             s_last_write   = now;
@@ -270,18 +263,13 @@ namespace JobResume {
     }
 
     bool read(Checkpoint& out) {
-        // Nothing here knows which volume the job was on, so look on both and
-        // take the newest valid record found anywhere.
-        Volume* volumes[2] = { &SD, &LocalFS };
-        Record  best;
-        bool    found = false;
-        for (Volume* vol : volumes) {
-            for (int slot = 0; slot < 2; ++slot) {
-                Record r;
-                if (load_slot(*vol, slot, r) && (!found || r.seq > best.seq)) {
-                    best  = r;
-                    found = true;
-                }
+        Record best;
+        bool   found = false;
+        for (int slot = 0; slot < 2; ++slot) {
+            Record r;
+            if (load_slot(slot, r) && (!found || r.seq > best.seq)) {
+                best  = r;
+                found = true;
             }
         }
         if (!found) {
@@ -320,14 +308,11 @@ namespace JobResume {
     }
 
     void clear() {
-        Volume* volumes[2] = { &SD, &LocalFS };
-        for (Volume* vol : volumes) {
-            for (int slot = 0; slot < 2; ++slot) {
-                std::error_code ec;
-                FluidPath       fpath { slot_name[slot], *vol, ec };
-                if (!ec) {
-                    remove(fpath.string().c_str());
-                }
+        for (int slot = 0; slot < 2; ++slot) {
+            std::error_code ec;
+            FluidPath       fpath { slot_name[slot], SD, ec };
+            if (!ec) {
+                remove(fpath.string().c_str());
             }
         }
         s_have_written = false;
@@ -389,9 +374,9 @@ namespace JobResume {
         // Open first, so a missing or altered file is refused before anything
         // moves.  Resuming at a byte offset into a file that changed would drop
         // the reader into the middle of some unrelated line.
-        // cp.path is canonical - "/sd/job.gcode", "/spiffs/job.gcode" - and
+        // cp.path is canonical and always on the card - "/sd/job.gcode" - and
         // FluidPath::canonPath() resolves the volume from that prefix itself, so
-        // the default passed here does not matter and no manual split is needed.
+        // no manual split is needed.
         InputFile* file;
         try {
             file = new InputFile(SD, cp.path.c_str());
