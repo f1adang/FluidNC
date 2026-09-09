@@ -29,9 +29,17 @@ class Channel;
 // The machine cannot know where it is after a power cut, and this build does
 // not assume homing.  Resume therefore restores everything except position, and
 // requires the operator to have re-established zero first.
+//
+// Only jobs on the SD card are checkpointed.  A job on the local filesystem is
+// a macro - homing, tool change, a few lines of setup - and resuming one
+// partway through is not something anybody wants.  It would also cost a flash
+// erase/write cycle every interval on a small partition shared with config.yaml
+// and the WebUI, and stop the flash cache on both cores each time while the
+// step ISR is running.  The card has neither problem, and is where long jobs
+// live.
 namespace JobResume {
     struct Checkpoint {
-        std::string path;      // job file, as given to $SD/Run
+        std::string path;      // job file on the card, canonical: "/sd/job.gcode"
         size_t      offset;    // byte offset to resume reading from
         int32_t     line;      // N word if the file had one, else 0
         uint32_t    file_size; // refuse to resume a file that has changed
@@ -49,7 +57,7 @@ namespace JobResume {
     };
 
     // Called from the main loop.  Cheap when there is nothing to do: it writes
-    // at most once per interval, and only while a job is actually running.
+    // at most once per interval, and only while an SD job is actually running.
     void poll();
 
     // Drop the stored checkpoint - a job that finished has nothing to resume.
