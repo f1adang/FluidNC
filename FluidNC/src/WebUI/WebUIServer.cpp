@@ -1456,6 +1456,7 @@ namespace WebUI {
 
     // File upload
     void WebUI_Server::uploadStart(AsyncWebServerRequest* request, const char* filename, uintmax_t filesize, const Volume& fs) {
+        log_info("uploadStart called for " << filename << " size " << filesize);
         std::error_code ec;
 
         // An upload that never finished leaves its file open.  The onDisconnect
